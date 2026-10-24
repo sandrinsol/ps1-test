@@ -267,11 +267,14 @@ npm run typecheck      # JSDoc types
 npm run fixtures       # rebuild tests/fixtures from src/ (needs a mipsel GCC)
 PSN00BSDK_LIBS=… node tests/template.mjs   # the template end to end (needs PSn00bSDK)
 npm run package-test   # pack, install into an empty project, drive an EXE
+npm run site-test      # the play page in a browser (or: node tests/site.mjs <deployed URL>)
 ```
 
 Releases: bump `version` in the repo-root `package.json`, this folder's
 `package.json` and `.claude-plugin/plugin.json` (`package-test` checks they match),
 optionally add `.github/release-notes/v<version>.md`, and merge to `main`: the
 `release` workflow tags it and publishes a GitHub release. The repo-root
-`package.json` describes the npm package (`ps1-test-mcp` bin); it isn't published
-to npm.
+`package.json` describes the npm package (`ps1-test-mcp` bin); the workflow also
+publishes it to npm when the repository has an `NPM_TOKEN` secret (an npm
+"automation" token), after which `npx ps1-test-mcp` runs the server and
+`npx ps1-test-mcp new psn00bsdk mygame` starts a project.

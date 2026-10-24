@@ -1,0 +1,33 @@
+# Smoke-tests every successful deployment of the play page (Vercel's GitHub
+# integration reports one per push and per PR preview): opens the deployed URL,
+# clicks "Try the demo" and checks that every request succeeds and the game draws.
+# For previews behind Vercel Authentication, add the project's "Protection Bypass
+# for Automation" secret as the VERCEL_AUTOMATION_BYPASS_SECRET repository secret.
+name: deployment
+
+on:
+  deployment_status:
+
+jobs:
+  smoke:
+    if: github.event.deployment_status.state == 'success'
+    name: play page on ${{ github.event.deployment.environment }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: harness
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.deployment.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: harness/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - run: node tests/site.mjs "$URL"
+        env:
+          URL: ${{ github.event.deployment_status.environment_url || github.event.deployment_status.target_url }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}

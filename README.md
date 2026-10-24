@@ -46,7 +46,11 @@ To host it, deploy the folder as a static site (no build step). It's set up for
 Vercel: import the repository at vercel.com/new (or run `npx vercel` in the
 folder) and keep the defaults — `vercel.json` skips the install and build, serves
 the folder as is and sets cache headers for the core files, and `.vercelignore`
-leaves the test harness and templates out of the deployment.
+leaves the test harness and templates out of the deployment. Each deployment
+(including PR previews) is then smoke-tested by the `deployment` workflow: it
+opens the deployed page, starts the demo and checks it draws. If previews sit
+behind Vercel Authentication, add the project's "Protection Bypass for
+Automation" secret to the repository as `VERCEL_AUTOMATION_BYPASS_SECRET`.
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsandrinsol%2Fps1-test)
 

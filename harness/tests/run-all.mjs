@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const SUITES = ['unit', 'core', 'script', 'mcp', 'template'];
+const SUITES = ['unit', 'core', 'script', 'mcp', 'site', 'template'];
 const want = process.argv.slice(2);
 let failed = [];
 for (const s of want.length ? want : SUITES) {

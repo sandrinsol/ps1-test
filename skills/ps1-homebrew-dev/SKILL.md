@@ -13,7 +13,8 @@ Speed: `ps1-performance`. Console differences: `ps1-real-hardware`.
 `new_project` (template `psn00bsdk`, a folder) gives a working game: double-buffered
 display, font, a TIM sprite moved by the pad (or left stick), a GTE cube, a sound
 effect, `frame_count`/`cpu_usage`, a passing smoke test, a CI workflow and a dev
-container. From a shell: `npx ps1-test-mcp new psn00bsdk mygame`.
+container. From a shell: `node <ps1-test>/harness/mcp-server.mjs new psn00bsdk mygame`
+(or `npx ps1-test-mcp new psn00bsdk mygame` when the package is installed from npm).
 
 The project's `ps1test.json` says how to build (`build`), what to load (`rom`,
 `symbols`), the `bios`, the variables to `watch`, and the `frameCounter` /

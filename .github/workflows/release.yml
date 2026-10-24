@@ -2,7 +2,8 @@
 # commit, when that version isn't released yet: on every push to main (so
 # merging a version bump releases it), on a pushed v* tag, or by hand ("Run
 # workflow"). The notes come from .github/release-notes/<tag>.md, else from the
-# merged PRs.
+# merged PRs. With an NPM_TOKEN repository secret it also publishes the package
+# to npm (as ps1-test-mcp), so `npx ps1-test-mcp` works.
 name: release
 
 on:
@@ -13,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
@@ -39,3 +41,17 @@ jobs:
           args=(--title "$TAG" --target "$GITHUB_SHA")
           if [ -f "$notes" ]; then args+=(--notes-file "$notes"); else args+=(--generate-notes); fi
           gh release create "$TAG" "${args[@]}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish to npm (when NPM_TOKEN is set and the version is new)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then echo "No NPM_TOKEN secret: skipping npm."; exit 0; fi
+          name=$(node -p "require('./package.json').name"); version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then echo "$name@$version is already on npm"; exit 0; fi
+          npm publish --provenance --access public

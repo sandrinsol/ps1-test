@@ -17,6 +17,8 @@ jobs:
         include:
           - os: macos-latest
             node: 22
+          - os: windows-latest
+            node: 22
     defaults:
       run:
         working-directory: harness
