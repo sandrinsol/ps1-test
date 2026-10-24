@@ -291,6 +291,35 @@ export function isoFile(img, name) {
   return null;
 }
 
+/** Every file and directory of a disc's ISO9660 file system:
+ *  [{ path, lba, size, dir }] (sectors from the start of the data track). */
+export function isoList(img) {
+  const sec = sectorReader(img);
+  const pvd = sec(16);
+  if (pvd.toString('latin1', 1, 6) !== 'CD001') return [];
+  const out = [], seen = new Set();
+  const walk = (lba, size, prefix) => {
+    if (seen.has(lba) || seen.size > 4096) return;
+    seen.add(lba);
+    for (let s = 0; s < Math.ceil(size / 2048); s++) {
+      const d = sec(lba + s);
+      for (let o = 0; o < 2048 && d[o];) {
+        const len = d[o], nl = d[o + 32];
+        const name = d.toString('latin1', o + 33, o + 33 + nl).replace(/;1$/, '');
+        const e = { lba: d.readUInt32LE(o + 2), size: d.readUInt32LE(o + 10), dir: !!(d[o + 25] & 2) };
+        if (nl !== 1 || (d[o + 33] !== 0 && d[o + 33] !== 1)) {   // skip "." and ".."
+          const path = prefix + name;
+          out.push({ path, ...e });
+          if (e.dir) walk(e.lba, e.size, path + '/');
+        }
+        o += len;
+      }
+    }
+  };
+  walk(pvd.readUInt32LE(156 + 2), pvd.readUInt32LE(156 + 10), '/');
+  return out;
+}
+
 /** SYSTEM.CNF of a disc → { boot, tcb, event, stack, raw } (null if missing). */
 export function systemCnf(img) {
   const f = isoFile(img, 'SYSTEM.CNF');

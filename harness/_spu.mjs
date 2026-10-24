@@ -1,0 +1,11 @@
+import { EmuHarness } from './driver.mjs';
+const emu = await EmuHarness.launch('tests/fixtures/hello.exe', { reuse: true });
+await emu.waitFrames(30);
+await emu.setButton('CROSS', true); await emu.waitFrames(3);
+const spu = await emu.spuState();
+console.log('ctrl', spu.ctrl.toString(16), 'audible', spu.audible.toString(2), spu.voices.filter((v) => v.envelope || v.pitch).slice(0, 3));
+const regs = await emu.spuRead(0, 0x400, 'regs');
+console.log('regs v0', regs.subarray(0, 16).toString('hex'), 'cnt', regs.readUInt16LE(0x1aa).toString(16));
+const ram = await emu.spuRead(0x1000, 64);
+console.log('ram', ram.toString('hex'));
+await emu.close();
