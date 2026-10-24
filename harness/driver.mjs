@@ -35,8 +35,14 @@ const MIME = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
   '.css': 'text/css', '.json': 'application/json', '.wasm': 'application/wasm',
   '.data': 'application/octet-stream', '.bin': 'application/octet-stream',
-  '.png': 'image/png', '.map': 'application/json',
+  '.png': 'image/png', '.map': 'application/json', '.webmanifest': 'application/manifest+json',
 };
+
+/** Chromium flags that keep every emulator page running at full speed. */
+export const BROWSER_ARGS = [
+  '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
+  '--disable-backgrounding-occluded-windows', '--disable-features=CalculateNativeWinOcclusion',
+];
 
 /** The frame every launch and reset leaves the machine on (see _settle). */
 export const BOOT_FRAME = 10;
@@ -104,6 +110,11 @@ async function startHost({ headless = true } = {}) {
         '--ignore-gpu-blocklist', '--enable-webgl',
         '--autoplay-policy=no-user-gesture-required',
         '--mute-audio', '--hide-scrollbars',
+        // Never slow a page down for being in the background or covered by
+        // another window: the emulator's frame loop runs on requestAnimationFrame,
+        // which Chromium throttles in such pages — on Windows even headless, when
+        // a second page or browser opens (native window-occlusion tracking).
+        ...BROWSER_ARGS,
       ],
     });
   } catch (e) {
