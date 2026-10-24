@@ -55,7 +55,7 @@ export function resolveBios(bios) {
 
 // Serves the repo root, plus each loaded ROM in place at /__rom/<token>/<name>
 // (no copying, so ROMs can live anywhere and the install dir can be read-only).
-function startServer(rootDir, roms) {
+export function startServer(rootDir, roms = new Map()) {
   const server = http.createServer(async (req, res) => {
     try {
       const urlPath = decodeURIComponent(req.url.split('?')[0]);
