@@ -24,13 +24,17 @@ The `psn00bsdk` template (`new_project`) uses v0.24.
 ## Toolchain pitfalls
 
 - `mipsel-linux-gnu` (Ubuntu/Debian package) works, with care:
-  - its libgcc is MIPS32r2 → "reserved instruction" exceptions on the PS1 when GCC
-    calls a helper (`__bswapsi2`, 64-bit division …). The template compiles
-    `src/libgcc_mips1.c` with MIPS I versions; `check` points at it when it sees
-    the exception.
+  - its libgcc is MIPS32r2 with hard-float helpers → "reserved instruction"
+    exceptions when GCC calls an integer helper (`__bswapsi2`, 64-bit division …)
+    and "coprocessor unusable" ones for `float`/`double` (`__addsf3` uses the FPU
+    the PS1 lacks). The template's install script builds `libmips1rt.a` (LLVM
+    compiler-rt's C runtime, incl. soft-float, for MIPS I) and the template links
+    it ahead of libgcc; without it, `src/libgcc_mips1.c` covers integers only.
+    `check` explains either exception.
   - it emits a `PT_GNU_STACK` program header at address 0: stock `elf2x` then makes a
     2 GB EXE. The template's install script applies `elf2x-ptload.patch`.
-  - no soft-float support for the PS1: don't use `float`/`double`.
+  - `float`/`double` then work, but in software (hundreds of cycles each): use
+    fixed point in per-frame code.
 - Let the SDK's CMake set the flags (`-march=r3000 -msoft-float`, gp-relative
   data with `GPREL`); extra `-march`/`-mips32` flags or prebuilt libraries made for
   another MIPS bring back the reserved-instruction crash.

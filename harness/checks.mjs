@@ -162,11 +162,16 @@ export class RunChecker {
     const n = this.frames;
     for (const e of this.exceptions.values()) {
       const fn = this.name(e.epc);
-      // A reserved instruction inside a compiler helper (__bswapsi2, __udivdi3…):
-      // a libgcc built for a newer MIPS than the PS1's MIPS I.
-      const hint = e.code === 10 && fn && /^__\w+/.test(fn)
-        ? ': a compiler runtime helper using instructions the R3000A lacks — the toolchain\'s libgcc was built for a newer MIPS (e.g. Debian/Ubuntu\'s mipsel-linux-gnu, MIPS32r2). Use a MIPS I toolchain (mipsel-none-elf) or plain-C versions of the helpers (templates/psn00bsdk/src/libgcc_mips1.c)'
-        : '';
+      // A reserved instruction or FPU use inside a compiler helper (__bswapsi2,
+      // __udivdi3, __addsf3…): a libgcc built for a newer MIPS than the PS1's
+      // MIPS I, or with hard float.
+      const helper = fn && /^__\w+/.test(fn);
+      const fix = 'Link a runtime built for MIPS I ahead of libgcc: libmips1rt.a (templates/psn00bsdk/.devcontainer/build-mips1-rt.sh; the template links it), or use a MIPS I mipsel-none-elf toolchain';
+      const hint = helper && e.code === 10
+        ? `: a compiler runtime helper using instructions the R3000A lacks — the toolchain's libgcc was built for a newer MIPS (e.g. Debian/Ubuntu's mipsel-linux-gnu, MIPS32r2). ${fix}`
+        : helper && e.code === 11
+          ? `: a float/double helper using the FPU (coprocessor 1), which the PS1 doesn't have — the toolchain's libgcc is built for hard float (e.g. Debian/Ubuntu's mipsel-linux-gnu). ${fix}`
+          : '';
       out.push({ level: 'error', msg: `CPU exception: ${EXC_NAMES[e.code] ?? `code ${e.code}`} at ${hex(e.epc)}${fn ? ` (${fn})` : ''}${e.code === 4 || e.code === 5 ? `, address ${hex(e.badVaddr)}` : ''}; first on frame ${e.frame} of the run${e.count > 1 ? `, ${e.count} times` : ''}${hint}` });
     }
     // In the BIOS/kernel at every frame boundary AND no sign of the game running

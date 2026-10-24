@@ -39,8 +39,17 @@ dump (best compatibility; it never leaves your computer).
 | Right stick | I J K L |
 
 The bar at the bottom has pause, save states, fullscreen, volume and settings
-(including gamepads and the controller type). Memory cards are kept in the
-browser's local storage.
+(including gamepads and the controller type). On a phone or tablet an on-screen
+PlayStation pad appears (D-pad, △ ○ ✕ □, L1/L2/R1/R2, Start/Select).
+
+- **Drag and drop** a disc image, EXE or zip onto the page to play it (a `.cue`
+  together with its `.bin` files).
+- **Memory card** (above the game): see the saves on the card (title, game ID,
+  blocks, icon), export it as `.mcr`, import a card (`.mcr`/`.mcd`/`.gme`/`.vgs`,
+  or drop it on the running game) or format it. Cards are kept in the browser's
+  storage between visits.
+- **Install it** from the browser's menu ("Install app" / "Add to Home Screen"):
+  after the first visit the page, the emulator and the demo work offline.
 
 To host it, deploy the folder as a static site (no build step). It's set up for
 Vercel: import the repository at vercel.com/new (or run `npx vercel` in the
