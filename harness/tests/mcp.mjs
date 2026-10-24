@@ -37,14 +37,14 @@ try {
   const ALL = ['load_disc', 'wait_frames', 'press', 'set_button', 'set_analog', 'wait_until', 'reset', 'screenshot',
     'read_memory', 'read_cpu', 'gpu_capture', 'view_vram', 'describe', 'status', 'write_memory', 'state', 'cheats',
     'memory_card', 'run_sequence', 'record_video', 'assert_golden', 'export_script', 'ab_compare', 'ram_search', 'build', 'check', 'new_project',
-    'texture', 'background', 'data'];
+    'texture', 'background', 'data', 'debug', 'profile', 'spu', 'cd_log'];
   for (const n of ALL) ok(`tool listed: ${n}`, names.includes(n));
   ok('exactly the documented tools', names.length === ALL.length, `${names.length}: ${names.filter((n) => !ALL.includes(n)).join(', ')}`);
   ok('screenshot is annotated read-only', tools.find((t) => t.name === 'screenshot').annotations?.readOnlyHint === true);
   const listJson = JSON.stringify(tools);
   ok('tool list is slim (no output schemas, $schema or ±2^53 bounds)',
     !tools.some((t) => t.outputSchema) && !listJson.includes('$schema') && !listJson.includes('9007199254740991'));
-  ok('tool list stays small', listJson.length / 4 < 3750, `~${Math.round(listJson.length / 4)} tokens`);
+  ok('tool list stays small', listJson.length / 4 < 4450, `~${Math.round(listJson.length / 4)} tokens`);
   ok('core set names real tools', CORE_TOOLS.every((t) => names.includes(t)));
   const { prompts } = await client.listPrompts();
   ok('prompts listed', ['smoke_test_rom', 'regression_check', 'find_ram_address', 'record_regression_test'].every((p) => prompts.some((x) => x.name === p)));
@@ -276,6 +276,50 @@ try {
   ok('the demo boots from disc through OpenBIOS', r.structuredContent.met, textOf(r));
   r = await call('check', { frames: 30 });
   ok('check: the demo has no errors or warnings', r.structuredContent.errors === 0 && r.structuredContent.warnings === 0, textOf(r));
+
+  // --- Debugger and profiler ---
+  await call('load_disc', { path: EXE });
+  r = await call('debug', { action: 'step' });
+  ok('debug step refuses when not halted', r.isError && /needs a halt/.test(textOf(r)), textOf(r));
+  r = await call('debug', { watch: [{ address: 'frame_count' }], halt: false, frames: 3 });
+  ok('debug logs watchpoint hits by writer', !r.isError && r.structuredContent.hits === 3 && /3× write to 0x[0-9a-f]+ \(frame_count\) by main\+\d+/.test(textOf(r)), textOf(r));
+  r = await call('debug', { break: ['joy_xfer'], frames: 5 });
+  ok('debug halts mid-frame at a breakpoint', r.structuredContent?.halted === true && /Halted mid-frame \d+ on breakpoint 0x80010040 \(joy_xfer\)/.test(textOf(r)), textOf(r).split('\n')[0]);
+  ok('halt shows disassembly at the pc', /> 80010040 <joy_xfer>  3c031f80  lui v1, 0x1f80/.test(textOf(r)));
+  ok('halt shows the call stack', /stack: joy_xfer ← main\+\d+ ← _start\+\d+/.test(textOf(r)), (textOf(r).match(/stack:.*/) ?? [''])[0]);
+  ok('halt shows registers', /\bsp=801f[0-9a-f]{4}\b/.test(textOf(r)));
+  const haltFrame = r.structuredContent.frame;
+  r = await call('debug', { action: 'step', count: 3 });
+  ok('debug step runs instructions and names changed registers', r.structuredContent?.ran === 3 && r.structuredContent.pc === 0x8001004c && /v1=0x1f800000/.test(textOf(r)), textOf(r).split('\n')[0]);
+  r = await call('debug', { action: 'continue' });
+  ok('debug continue stops at the next hit', r.structuredContent?.halted === true && /joy_xfer/.test(textOf(r)), textOf(r).split('\n')[0]);
+  r = await call('debug', { action: 'disasm', address: 'joy_xfer', count: 6 });
+  ok('debug disasm from a symbol', textOf(r).split('\n').length === 6 && /beq v0, zero, 0x80010048 <joy_xfer\+8>/.test(textOf(r)), textOf(r));
+  r = await call('debug', { action: 'off' });
+  await call('wait_frames', { frames: 5 });
+  r = await call('read_memory', { address: 'frame_count', as: 'u32' });
+  const fc = r.structuredContent.values[0];
+  r = await call('status');
+  ok('frames stay in step with the game after halts', fc === r.structuredContent.frame && r.structuredContent.frame >= haltFrame + 5, `frame_count ${fc}, frame ${r.structuredContent.frame}`);
+  r = await call('profile', { frames: 10 });
+  ok('profile groups samples by function', !r.isError && r.structuredContent.samples > 10000 && r.structuredContent.top === 'main' && /%  joy_xfer/.test(textOf(r)), textOf(r));
+
+  // --- Sound chip and CD-ROM ---
+  r = await call('spu');
+  ok('spu: nothing playing before Cross', !r.isError && r.structuredContent.playing === 0 && /SPU on, unmuted/.test(textOf(r)), textOf(r));
+  await call('set_button', { button: 'CROSS', pressed: true });
+  await call('wait_frames', { frames: 5 });
+  r = await call('spu');
+  ok('spu: the tone on voice 0 (rate, start address)', r.structuredContent.playing === 1 && /voice 0: (attack|decay|sustain) .*\(22050 Hz\) start 0x1000/.test(textOf(r)) && r.structuredContent.problems === 0, textOf(r));
+  await call('set_button', { button: 'CROSS', pressed: false });
+  r = await call('spu', { action: 'sample', voice: 0, save: rel('tone.wav') });
+  ok('spu sample: the looping square wave to .wav', !r.isError && r.structuredContent.blocks === 2 && r.structuredContent.looped && (await readFile(path.join(OUT, 'tone.wav'))).toString('latin1', 0, 4) === 'RIFF', textOf(r));
+  r = await call('cd_log', { frames: 10 });
+  ok('cd_log on an EXE: no disc, nothing read', !r.isError && r.structuredContent.sectors === 0 && /no disc/.test(textOf(r)), textOf(r));
+  await call('load_disc', { path: CUE });
+  r = await call('cd_log', { frames: 200, list: 200 });
+  ok('cd_log: the BIOS reading SYSTEM.CNF and MAIN.EXE', !r.isError && r.structuredContent.sectors > 5 && /\/SYSTEM\.CNF/.test(textOf(r)) && /\/MAIN\.EXE/.test(textOf(r)) && /Setloc 00:02:\d\d = sector \d+/.test(textOf(r)), textOf(r).split('\n')[0]);
+  ok('cd_log: the log is not reported full', !/LOG FULL/.test(textOf(r)));
 
   // --- Analog via MCP ---
   r = await call('load_disc', { path: EXE, pad1: 'analog' });

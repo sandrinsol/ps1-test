@@ -189,6 +189,7 @@
     };
     const restore = async (u8, frame) => {
       setFF(false);
+      if (Emu._dbgActive || Emu._partial) { const b = dbgBlock(); b[DBG.HALTED] = 0; b[DBG.IDLE] = 0; Emu._partial = false; }
       for (let attempt = 0; attempt < 10; attempt++) {
         gm().loadState(u8);
         Emu.stats.rewinds++; // this iteration runs one frame of the old timeline
@@ -297,7 +298,7 @@
       const timeoutMs = 30000 + (targetFrame - Emu.frameNum()) * (1000 / FPS) * 2;
       const t0 = performance.now();
       let snap = null, snapFrame = 0;
-      if (Emu.fast && !Emu._rec && targetFrame - Emu.frameNum() > FF_MARGIN * 2) {
+      if (Emu.fast && !Emu._rec && !Emu._dbgActive && targetFrame - Emu.frameNum() > FF_MARGIN * 2) {
         snapFrame = Emu.frameNum();
         snap = gm().getState();
         Emu.stats.ffWaits++;
@@ -316,6 +317,7 @@
           f = Emu.frameNum();
         }
         if (ffOn && targetFrame - f <= FF_MARGIN) setFF(false);
+        if (dbgHalted()) { Emu.pause(); dbgOnHalt(); Emu._advanced(); return Emu.frameNum(); }
         if (f >= targetFrame && !ffOn) { Emu.pause(); Emu._advanced(); return f; }
         if (performance.now() - t0 > timeoutMs) {
           setFF(false);
@@ -331,8 +333,15 @@
     // boot (frame 0), so identical scripts stop on identical emulated frames across
     // runs regardless of boot jitter. (Verified bit-identical.)
     Emu._target = 0;
-    Emu.waitFrames = (n) => { Emu._target += n; return waitUntil(Emu._target); };
-    Emu.waitUntilFrame = (abs) => { if (abs > Emu._target) Emu._target = abs; return waitUntil(abs); };
+    // While halted mid-frame (debugger), a wait first finishes that frame.
+    Emu.waitFrames = async (n) => {
+      if (Emu._partial) { await Emu.dbgFinishFrame(); if (Emu._partial) return Emu.frameNum(); }
+      Emu._target += n; return waitUntil(Emu._target);
+    };
+    Emu.waitUntilFrame = async (abs) => {
+      if (Emu._partial) { await Emu.dbgFinishFrame(); if (Emu._partial) return Emu.frameNum(); }
+      if (abs > Emu._target) Emu._target = abs; return waitUntil(abs);
+    };
 
     // Press button(s), hold for holdFrames, release, then settle for releaseFrames.
     // `name` may be one button or an array pressed together (e.g. ['A','B']).
@@ -458,6 +467,7 @@
         Emu._screen = Emu._boot.png;
         return;
       }
+      if (Emu._dbgActive || Emu._partial) { const b = dbgBlock(); b[DBG.HALTED] = 0; b[DBG.IDLE] = 0; Emu._partial = false; }
       gm().restart();
       const c = gm().getFrameNum();
       Emu.resume();
@@ -581,12 +591,13 @@
     // lacks these and the harness falls back to save-state parsing.
     const M = () => gm().Module;
     Emu.hasInstrumentation = () => typeof M()._ps1test_log_ctl === 'function';
-    Emu.logCtl = (on) => { if (Emu.hasInstrumentation()) M()._ps1test_log_ctl(on ? 1 : 0); };
+    /** on: true/1 GPU commands + exceptions, 2 CD-ROM, 3 both, false/0 off. */
+    Emu.logCtl = (on) => { if (Emu.hasInstrumentation()) M()._ps1test_log_ctl(on === true ? 1 : on || 0); };
     /** The log as { words: base64 (LE u32s), overflow }, or null. */
     Emu.logRead = () => {
       if (!Emu.hasInstrumentation()) return null;
       const ptr = M()._ps1test_log_buf(), n = M()._ps1test_log_len();
-      return { words: u8ToB64(M().HEAPU8.subarray(ptr, ptr + n * 4)), overflow: !!(M()._ps1test_log_flags() & 2) };
+      return { words: u8ToB64(M().HEAPU8.subarray(ptr, ptr + n * 4)), overflow: !!(M()._ps1test_log_flags() & 0x100) };
     };
     /** The CPU-register and GPU blocks of a save state, cut out in the page so a
      *  per-frame check needn't move the whole 4 MB state: { regs, gpu } base64. */
@@ -611,6 +622,94 @@
       const bytes = b64ToU8(b64);
       let o = 0;
       for (const [w, off, len] of runs) { area(w).set(bytes.subarray(o, o + len), off); o += len; }
+    };
+
+    // ---- Debugger (breakpoints, watchpoints, stepping, profiler) ----
+    // The core keeps a block of words (see core/pcsx_rearmed-ps1test.patch,
+    // psxinterpreter.c): flags, breakpoints, watchpoints, hits, registers. With
+    // "halt" on, a hit stops the CPU mid-frame; the core then skips the CPU in the
+    // frames the main loop runs until we resume, and those idle runs are taken off
+    // the logical clock so frame numbers stay those of a run without the debugger.
+    const DBG = { FLAGS: 0, HALTED: 1, IDLE: 2, SKIP: 3, NEXEC: 4, EXEC: 5, NWATCH: 21, WATCH: 22, NHITS: 102,
+      TOTAL: 103, MAXHITS: 104, PROF_INTERVAL: 105, PROF_N: 106, PROF_NEXT: 107, REGS: 108, HIT0: 160 };
+    const dbgBlock = () => { const p = M()._ps1test_dbg_block(); return new Uint32Array(M().HEAPU8.buffer, p, 160 + 256 * 16); };
+    Emu.hasDebugger = () => typeof M()._ps1test_dbg_block === 'function';
+    Emu._partial = false;      // halted mid-frame (the frame isn't finished)
+    Emu._dbgActive = false;    // breakpoints/watchpoints/profiler on: no fast-forward
+    /** { exec: [addr], watch: [[start, end, mode, op, value]], halt, maxHits, profile: interval|0 } */
+    Emu.dbgConfig = (c) => {
+      const b = dbgBlock();
+      const exec = (c.exec || []).slice(0, 16), watch = (c.watch || []).slice(0, 16);
+      b[DBG.NEXEC] = exec.length; exec.forEach((a, i) => { b[DBG.EXEC + i] = a >>> 0; });
+      b[DBG.NWATCH] = watch.length; watch.forEach((w, i) => w.forEach((v, k) => { b[DBG.WATCH + i * 5 + k] = v >>> 0; }));
+      b[DBG.NHITS] = 0; b[DBG.TOTAL] = 0; b[DBG.MAXHITS] = c.maxHits ?? 256;
+      b[DBG.PROF_INTERVAL] = c.profile || 0; b[DBG.PROF_N] = 0; b[DBG.PROF_NEXT] = 0;
+      b[DBG.FLAGS] = (exec.length ? 1 : 0) | (watch.length ? 2 : 0) | (c.profile ? 4 : 0) | (c.halt ? 8 : 0);
+      Emu._dbgActive = b[DBG.FLAGS] !== 0;
+    };
+    /** Disarm breakpoints, watchpoints and the profiler, staying halted (so a
+     *  halted frame can then finish without stopping again). */
+    Emu.dbgDisarm = () => { if (Emu.hasDebugger()) dbgBlock()[DBG.FLAGS] = 0; };
+    Emu.dbgOff = () => {
+      if (!Emu.hasDebugger()) return;
+      const b = dbgBlock();
+      b[DBG.FLAGS] = 0; b[DBG.HALTED] = 0; b[DBG.IDLE] = 0; b[DBG.SKIP] = 1;
+      Emu._dbgActive = false; Emu._partial = false;
+    };
+    const dbgHalted = () => Emu._dbgActive && dbgBlock()[DBG.HALTED] === 1;
+    // Called when the CPU has halted: the idle runs since are not frames.
+    const dbgOnHalt = () => {
+      const b = dbgBlock();
+      Emu._offset += b[DBG.IDLE]; b[DBG.IDLE] = 0;
+      Emu._partial = true;
+      Emu._target = Emu.frameNum();
+    };
+    /** Finish the halted frame (the run that does so isn't a new frame). It may
+     *  halt again on the way: then the frame is still partial. */
+    Emu.dbgFinishFrame = async () => {
+      if (!Emu._partial) return;
+      const b = dbgBlock();
+      b[DBG.HALTED] = 0;
+      const c = gm().getFrameNum();
+      Emu.resume();
+      while (gm().getFrameNum() <= c) await raf();
+      Emu.pause();
+      Emu._offset += 1 + b[DBG.IDLE]; b[DBG.IDLE] = 0;
+      Emu._partial = b[DBG.HALTED] === 1;
+      Emu._fbValid = false;
+    };
+    /** { halted, partial, hits: [[16 words]], total, regs: [40 words] } */
+    Emu.dbgState = () => {
+      M()._ps1test_regs();
+      const b = dbgBlock(), n = b[DBG.NHITS];
+      return {
+        halted: b[DBG.HALTED] === 1, partial: Emu._partial, total: b[DBG.TOTAL], flags: b[DBG.FLAGS],
+        hits: Array.from({ length: n }, (_, i) => Array.from(b.subarray(DBG.HIT0 + i * 16, DBG.HIT0 + i * 16 + 16))),
+        regs: Array.from(b.subarray(DBG.REGS, DBG.REGS + 40)),
+      };
+    };
+    /** Execute up to n instructions while halted; → how many ran. */
+    Emu.dbgStep = (n) => {
+      if (!Emu._partial) throw new Error('not halted: run with a breakpoint or watchpoint and halt first');
+      const r = M()._ps1test_step(n); Emu._fbValid = false; return r;
+    };
+    /** Forget the hits recorded so far (the next one is hits[0]). */
+    Emu.dbgClearHits = () => { dbgBlock()[DBG.NHITS] = 0; };
+    /** Profiler samples (pc values) as base64 of LE u32s. */
+    Emu.profRead = () => {
+      const n = dbgBlock()[DBG.PROF_N], p = M()._ps1test_prof_buf();
+      return { samples: u8ToB64(M().HEAPU8.subarray(p, p + n * 4)), full: n >= (1 << 20) };
+    };
+
+    // ---- SPU ----
+    Emu.spuState = () => {
+      const p = M()._ps1test_spu_state();
+      return Array.from(new Uint32Array(M().HEAPU8.buffer, p, 8 + 24 * 8));
+    };
+    /** which: 0 SPU RAM (512 KB), 1 registers (0x400 bytes at 0x1F801C00). */
+    Emu.spuRead = (which, off, len) => {
+      const p = M()._ps1test_spu_ptr(which);
+      return p ? u8ToB64(M().HEAPU8.subarray(p + off, p + off + len)) : null;
     };
 
     // ---- Memory cards ----

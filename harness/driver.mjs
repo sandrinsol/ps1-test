@@ -26,6 +26,7 @@ import * as psxMem from './psx-memory.mjs';
 import { findSymbols, loadSymbols, parseAddress } from './symbols.mjs';
 import { discFiles, exeInfo } from './disc.mjs';
 import { decodeLog } from './gpu.mjs';
+import { decodeCdLog } from './cdrom.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..'); // the repo root (served to the browser)
@@ -444,6 +445,108 @@ export class EmuHarness {
     }
     const cap = decodeLog(Buffer.from(log.words, 'base64'), startEx);
     return { ...cap, overflow: log.overflow, frame: await this.frameNum() };
+  }
+
+  // ---- Debugger (instrumented core) ----
+  _needDebugger() {
+    if (!this.live) throw new Error('the debugger needs the bundled ps1-test core');
+  }
+  /** Set breakpoints and watchpoints (replacing earlier ones). exec: addresses
+   *  (or symbols) to stop before; watch: [{ address, length = 4, on: 'write' |
+   *  'read' | 'access', changed, op: 'eq'|'ne'|'lt'|'gt'|'lte'|'gte', value }].
+   *  halt: stop mid-frame at the first hit (else hits are only logged, up to
+   *  maxHits). Watchpoints see CPU loads/stores, not DMA. */
+  async debugSet({ exec = [], watch = [], halt = false, maxHits = 256, profile = 0 } = {}) {
+    this._needDebugger();
+    if (exec.length > 16 || watch.length > 16) throw new Error('at most 16 breakpoints and 16 watchpoints');
+    const OPS = { eq: 1, ne: 2, lt: 3, gt: 4, lte: 5, gte: 6 };
+    const norm = (a) => { a = (a & 0x1fffffff) >>> 0; return a < 0x800000 ? a & 0x1fffff : a; };
+    const cfg = {
+      exec: exec.map((a) => this.addr(a)),
+      watch: watch.map((w) => {
+        const start = norm(this.addr(w.address)), len = w.length ?? 4;
+        const mode = { read: 1, write: 2, access: 3 }[w.on ?? 'write'] | (w.changed ? 4 : 0);
+        if (!mode) throw new Error(`watch "on" must be read, write or access`);
+        if (w.op && !OPS[w.op]) throw new Error(`watch op must be one of ${Object.keys(OPS).join(', ')}`);
+        return [start, start + len, mode, w.op ? OPS[w.op] : 0, (w.value ?? 0) >>> 0];
+      }),
+      halt, maxHits, profile,
+    };
+    this._state = null;
+    await this.page.evaluate((c) => window.Emu.dbgConfig(c), cfg);
+  }
+  /** Remove all breakpoints, watchpoints and the profiler; finish a halted frame. */
+  async debugOff() {
+    if (!this.live) return;
+    this._state = null;
+    await this.page.evaluate(async () => { window.Emu.dbgDisarm(); await window.Emu.dbgFinishFrame(); window.Emu.dbgOff(); });
+  }
+  /** { halted, partial, total, hits: [{ kind, pc, addr, size, value, old, ra, sp,
+   *  cycle, index, args: [v0, a0..a3], code }], regs: { pc, r[32], lo, hi, sr,
+   *  cause, epc, badVaddr, cycle } }. clear: forget the hits after reading them. */
+  async debugState({ clear = false } = {}) {
+    this._needDebugger();
+    const st = await this.page.evaluate((c) => { const s = window.Emu.dbgState(); if (c) window.Emu.dbgClearHits(); return s; }, clear);
+    const KIND = { 1: 'exec', 2: 'read', 4: 'write' };
+    const r = st.regs;
+    return {
+      halted: st.halted, partial: st.partial, total: st.total,
+      hits: st.hits.map((h) => ({ kind: KIND[h[0]], pc: h[1], addr: h[2], size: h[3], value: h[4], old: h[5], ra: h[6], sp: h[7], cycle: h[8], index: h[9], args: h.slice(10, 15), code: h[15] })),
+      regs: { r: r.slice(0, 32), lo: r[32], hi: r[33], pc: r[34], sr: r[35], cause: r[36], epc: r[37], badVaddr: r[38], cycle: r[39] },
+    };
+  }
+  /** While halted mid-frame: execute up to n instructions → how many ran (stops
+   *  on a hit). Throws when not halted. */
+  async debugStep(n = 1) {
+    this._needDebugger();
+    this._state = null;
+    return this.page.evaluate((k) => window.Emu.dbgStep(k), n);
+  }
+  /** Run `frames` frames sampling the pc every `interval` CPU cycles → Uint32Array of pcs. */
+  async profile(frames, { interval = 256 } = {}) {
+    this._needDebugger();
+    await this.debugSet({ profile: interval });
+    try { await this.waitFrames(frames); } finally {
+      var r = await this.page.evaluate(() => { const p = window.Emu.profRead(); window.Emu.dbgOff(); return p; });
+    }
+    const b = Buffer.from(r.samples, 'base64');
+    return { samples: new Uint32Array(b.buffer, b.byteOffset, b.length / 4), full: r.full };
+  }
+
+  // ---- SPU (instrumented core) ----
+  /** { ctrl, stat, transferAddr, audible, keyedOn, dead, irqAddr, voices: [{ voice,
+   *  current, loop, envelope, adsr, noise, reverb, fmod, pitch, volL, volR }] }
+   *  (addresses are byte offsets in SPU RAM). */
+  async spuState() {
+    this._needDebugger();
+    const w = await this.page.evaluate(() => window.Emu.spuState());
+    const ADSR = ['attack', 'decay', 'sustain', 'release'];
+    return {
+      ctrl: w[0], stat: w[1], transferAddr: w[2], audible: w[3], keyedOn: w[4], dead: w[5], irqAddr: w[6] === 0xffffffff ? null : w[6],
+      voices: Array.from({ length: 24 }, (_, i) => {
+        const v = w.slice(8 + i * 8, 16 + i * 8);
+        return { voice: i, current: v[0], loop: v[1], envelope: v[2] | 0, adsr: ADSR[v[3] & 3], noise: !!(v[3] & 0x100), reverb: !!(v[3] & 0x200), fmod: !!(v[3] & 0x400), pitch: v[4], volL: v[5] | 0, volR: v[6] | 0 };
+      }),
+    };
+  }
+  /** Bytes of SPU RAM (512 KB) or of the SPU registers ('regs', 0x400 bytes from 0x1F801C00). */
+  async spuRead(offset, length, which = 'ram') {
+    this._needDebugger();
+    const b64 = await this.page.evaluate(([w, o, n]) => window.Emu.spuRead(w, o, n), [which === 'regs' ? 1 : 0, offset, length]);
+    return Buffer.from(b64, 'base64');
+  }
+
+  // ---- CD-ROM log (instrumented core) ----
+  /** Run `frames` frames logging CD-ROM commands, interrupts and sector reads:
+   *  [{ type: 'command'|'irq'|'read', cycle, frame?, ... }]. */
+  async cdLog(frames) {
+    this._needDebugger();
+    const f0 = await this.frameNum();
+    await this.page.evaluate(() => window.Emu.logCtl(2));
+    try { await this.waitFrames(frames); } finally {
+      var log = await this.page.evaluate(() => { const l = window.Emu.logRead(); window.Emu.logCtl(0); return l; });
+    }
+    return { entries: decodeCdLog(Buffer.from(log.words, 'base64')), overflow: log.overflow, from: f0, to: await this.frameNum() };
   }
 
   // ---- Memory cards ----

@@ -47,6 +47,9 @@ give the same frames, RAM and GPU commands.
 - Every load and reset ends on frame 10, so input right after a load is deterministic.
 - Hung game? `check` names the CPU exception and the function it happened in;
   `read_cpu` shows where the CPU is (`cop0` cause for exceptions).
+- Who changes a value? `debug` with `watch: [{address}]` and `halt: false` lists
+  every write with the function that made it; with `halt` it stops there with the
+  call stack. Turn it `off` when done. Slow game: `profile` shows time per function.
 - Textures and VRAM: `view_vram` (`gpu: true` outlines the texture pages and CLUTs
   in use); one texture through its CLUT: `what: "texture"`.
 - Memory cards: `memory_card` `list` shows saves (title, blocks, icon); `import`
