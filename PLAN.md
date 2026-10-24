@@ -16,7 +16,7 @@ play PS1 games in the browser, or let an AI agent test them through an MCP serve
 | Memory cards | Import/export `.mcr`/`.mcd` for both slots + block list (game ID, title, icon PNG) |
 | Cheats | GameShark / Action Replay |
 | Sample game | Original demo (sprite, text, GTE cube, sound) — also the test fixture |
-| Play page | `index.html` + Netlify, same as the GB repo |
+| Play page | `index.html` + Vercel (`vercel.json`) |
 | Scope | Full parity with the GB repo |
 | Licence | GPL-3.0-or-later |
 | Reuse | Port platform-neutral modules from the GB repo (png, bmp, assert, recording/video, ramsearch, steps, runner, build parsing) |

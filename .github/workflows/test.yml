@@ -58,6 +58,10 @@ jobs:
       # OpenBIOS and HLE), script (CLI runner + goldens) and mcp (the server).
       - run: npm test
 
+      # npm pack -> install into an empty project -> drive an EXE through the bin.
+      - if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: npm run package-test
+
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

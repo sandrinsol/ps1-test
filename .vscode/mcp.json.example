@@ -1,0 +1,10 @@
+{
+  "// note": "Copy to .vscode/mcp.json and set the path to mcp-server.mjs.",
+  "servers": {
+    "ps1-test": {
+      "command": "node",
+      "args": ["/absolute/path/to/ps1-test/harness/mcp-server.mjs"],
+      "env": { "PS1TEST_ROOT": "${workspaceFolder}" }
+    }
+  }
+}

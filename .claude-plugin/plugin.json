@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "ps1-test",
+  "version": "1.0.0",
+  "description": "Play, test and debug PlayStation (PS1) games and homebrew from Claude Code: an MCP server around a bundled emulator (pcsx_rearmed + OpenBIOS) plus skills for testing, PSn00bSDK development, performance and CI.",
+  "author": { "name": "sandrinsol" },
+  "repository": "https://github.com/sandrinsol/ps1-test",
+  "license": "GPL-3.0-or-later",
+  "keywords": ["playstation", "ps1", "psx", "emulator", "testing", "homebrew", "psn00bsdk", "mcp"],
+  "mcpServers": {
+    "ps1-test": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/harness/launch.mjs"]
+    }
+  }
+}
