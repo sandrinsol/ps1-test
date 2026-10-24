@@ -322,12 +322,22 @@
         if (performance.now() - t0 > timeoutMs) {
           setFF(false);
           Emu.pause();
-          throw new Error(`waitFrames timeout: frame ${f} < target ${targetFrame}`);
+          throw new Error(`waitFrames timeout: frame ${f} < target ${targetFrame} (${Emu.stallInfo()})`);
         }
         await raf();
         recTick();
       }
     }
+
+    // What the page looked like when the clock stopped advancing (for diagnosing
+    // a stalled emulator: focus, visibility, audio, EmulatorJS's own pause state).
+    Emu.stallInfo = () => {
+      let audio = '?';
+      try { audio = gm().Module.AL?.currentCtx?.audioCtx?.state ?? 'none'; } catch {}
+      const e = window.EJS_emulator;
+      return [`core frame ${gm().getFrameNum()}`, `focus ${document.hasFocus()}`, `visibility ${document.visibilityState}`,
+        `audio ${audio}`, `ejs paused ${e?.paused}`, `running ${Emu._running}`, `ff ${ffOn}`].join(', ');
+    };
 
     // Deterministic clock: targets accumulate on ONE absolute timeline anchored at
     // boot (frame 0), so identical scripts stop on identical emulated frames across
