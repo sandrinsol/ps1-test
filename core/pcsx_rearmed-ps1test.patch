@@ -1,0 +1,139 @@
+diff --git a/libpcsxcore/r3000a.c b/libpcsxcore/r3000a.c
+index cfd1ab0..1d72b66 100644
+--- a/libpcsxcore/r3000a.c
++++ b/libpcsxcore/r3000a.c
+@@ -112,8 +112,14 @@ void psxShutdown() {
+ }
+ 
+ // cp0 is passed separately for lightrec to be less messy
++void ps1test_log_exception(u32 cause, u32 epc, u32 badvaddr);
++
+ void psxException(u32 cause, enum R3000Abdt bdt, psxCP0Regs *cp0) {
+ 	u32 opcode = intFakeFetch(psxRegs.pc);
++
++	// ps1-test: log every exception but interrupts and syscalls
++	if (((cause >> 2) & 0x1f) != 0 && ((cause >> 2) & 0x1f) != 8)
++		ps1test_log_exception(cause, bdt ? psxRegs.pc - 4 : psxRegs.pc, cp0->n.BadVAddr);
+ 	
+ 	if (unlikely(!Config.HLE && (opcode >> 25) == 0x25)) {
+ 		// "hokuto no ken" / "Crash Bandicot 2" ...
+diff --git a/plugins/gpulib/gpu.c b/plugins/gpulib/gpu.c
+index e82cc0e..3ceac8c 100644
+--- a/plugins/gpulib/gpu.c
++++ b/plugins/gpulib/gpu.c
+@@ -28,6 +28,71 @@
+ 
+ struct psx_gpu gpu;
+ 
++/* ---- ps1-test instrumentation ----
++ * A log of what the GPU was sent, for the ps1-test harness: GP0 packets (with
++ * the RAM address of each DMA-chain packet), GP1 writes, chain starts and CPU
++ * exceptions. The harness turns it on for one frame and reads it back from JS.
++ * Entry: header word (type << 28 | source << 24 | word count), an address word,
++ * then the words. Types: 1 GP0 (source 0 CPU, 1 DMA block, 2 DMA chain),
++ * 2 GP1, 3 chain start, 4 CPU exception (cause, EPC, BadVaddr). */
++#ifndef EMSCRIPTEN_KEEPALIVE
++#define EMSCRIPTEN_KEEPALIVE
++#endif
++#define PS1TEST_LOG_WORDS (1 << 19)
++static uint32_t ps1test_log[PS1TEST_LOG_WORDS];
++static int ps1test_log_used, ps1test_log_on, ps1test_log_overflow;
++extern signed char *psxM, *psxH, *psxR;
++
++static void ps1test_put(uint32_t type, uint32_t src, uint32_t addr, const uint32_t *w, int n)
++{
++  if (!ps1test_log_on)
++    return;
++  if (ps1test_log_used + 2 + n > PS1TEST_LOG_WORDS) {
++    ps1test_log_overflow = 1;
++    return;
++  }
++  ps1test_log[ps1test_log_used++] = (type << 28) | (src << 24) | (n & 0xffffff);
++  ps1test_log[ps1test_log_used++] = addr;
++  memcpy(ps1test_log + ps1test_log_used, w, n * 4);
++  ps1test_log_used += n;
++}
++
++/* PS1 address of a pointer into main RAM (0 if it isn't one). */
++static uint32_t ps1test_ram_addr(const void *p)
++{
++  const signed char *c = p;
++  if (psxM && c >= psxM && c < psxM + 0x200000)
++    return 0x80000000u | (uint32_t)(c - psxM);
++  return 0;
++}
++
++void ps1test_log_exception(uint32_t cause, uint32_t epc, uint32_t badvaddr)
++{
++  uint32_t w[3] = { cause, epc, badvaddr };
++  ps1test_put(4, 0, 0, w, 3);
++}
++
++EMSCRIPTEN_KEEPALIVE void ps1test_log_ctl(int on)
++{
++  ps1test_log_used = 0;
++  ps1test_log_overflow = 0;
++  ps1test_log_on = on;
++}
++EMSCRIPTEN_KEEPALIVE uint32_t *ps1test_log_buf(void) { return ps1test_log; }
++EMSCRIPTEN_KEEPALIVE int ps1test_log_len(void) { return ps1test_log_used; }
++EMSCRIPTEN_KEEPALIVE int ps1test_log_flags(void) { return ps1test_log_on | (ps1test_log_overflow << 1); }
++/* 0: main RAM (2 MB), 1: scratchpad + I/O (64 KB), 2: VRAM (1 MB), 3: BIOS (512 KB) */
++EMSCRIPTEN_KEEPALIVE void *ps1test_ptr(int which)
++{
++  switch (which) {
++  case 0: return psxM;
++  case 1: return psxH;
++  case 2: return gpu.vram;
++  case 3: return psxR;
++  }
++  return NULL;
++}
++
+ static noinline int do_cmd_buffer(struct psx_gpu *gpu, uint32_t *data, int count,
+     int *cycles_sum, int *cycles_last);
+ static noinline void finish_vram_transfer(struct psx_gpu *gpu, int is_read);
+@@ -310,6 +375,7 @@ long GPUshutdown(void)
+ void GPUwriteStatus(uint32_t data)
+ {
+   uint32_t cmd = data >> 24;
++  ps1test_put(2, 0, 0, &data, 1);
+   uint32_t fb_dirty = 1;
+   int src_x, src_y;
+ 
+@@ -772,6 +838,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
+   if (unlikely(gpu.cmd_len > 0))
+     flush_cmd_buffer(&gpu);
+ 
++  ps1test_put(1, 1, ps1test_ram_addr(mem), mem, count);
+   left = do_cmd_buffer(&gpu, mem, count, &dummy, &dummy);
+   if (left)
+     log_anomaly(&gpu, "GPUwriteDataMem: discarded %d/%d words\n", left, count);
+@@ -780,6 +847,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
+ void GPUwriteData(uint32_t data)
+ {
+   log_io(&gpu, "gpu_write %08x\n", data);
++  ps1test_put(1, 0, 0, &data, 1);
+   gpu.cmd_buffer[gpu.cmd_len++] = HTOLE32(data);
+   if (gpu.cmd_len >= CMD_BUFFER_LEN)
+     flush_cmd_buffer(&gpu);
+@@ -799,6 +867,10 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
+     flush_cmd_buffer(&gpu);
+ 
+   log_io(&gpu, "gpu_dma_chain\n");
++  {
++    uint32_t a = 0x80000000u | (start_addr & 0x1fffff);
++    ps1test_put(3, 0, a, NULL, 0);
++  }
+   addr = ld_addr = start_addr & 0xffffff;
+   for (count = 0; (addr & 0x800000) == 0; count++)
+   {
+@@ -813,6 +885,8 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
+ 
+     log_io(&gpu, ".chain %08lx #%d+%d %u+%u\n",
+       (long)(list - rambase) * 4, len, gpu.cmd_len, cpu_cycles_sum, cpu_cycles_last);
++    if (len)
++      ps1test_put(1, 2, 0x80000000u | (uint32_t)((list - rambase) * 4), list + 1, len);
+     if (unlikely(gpu.cmd_len > 0)) {
+       if (gpu.cmd_len + len > ARRAY_SIZE(gpu.cmd_buffer)) {
+         log_anomaly(&gpu, "cmd_buffer overflow, likely garbage commands\n");

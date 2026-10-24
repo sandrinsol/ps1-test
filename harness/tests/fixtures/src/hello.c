@@ -1,7 +1,10 @@
 /* Test fixture: a coloured box the D-pad (or the left stick) moves, a frame
- * counter, the pad reading in RAM, and an SPU tone while Cross is held. Bare
- * metal (no BIOS calls after boot), so it runs the same under OpenBIOS, HLE
- * and a real BIOS. */
+ * counter, the pad reading in RAM, and an SPU tone while Cross is held. Each
+ * frame also sends a gouraud triangle, a textured 16x16 sprite (4-bit texture
+ * + CLUT uploaded at start) and a line through a linked-list DMA chain, like a
+ * game's ordering table. Holding L2+R2+SELECT does an unaligned load (an
+ * address error exception). Bare metal (no BIOS calls after boot), so it runs
+ * the same under OpenBIOS, HLE and a real BIOS. */
 #include <stdint.h>
 
 #define REG(a) (*(volatile uint32_t *)(a))
@@ -24,6 +27,14 @@ volatile uint8_t stick_lx = 0x80, stick_ly = 0x80, stick_rx = 0x80, stick_ry = 0
 volatile uint8_t tone_on;
 
 #define SPU16(o) (*(volatile uint16_t *)(0x1f801c00 + (o)))
+#define D2_MADR REG(0x1f8010a0)
+#define D2_BCR REG(0x1f8010a4)
+#define D2_CHCR REG(0x1f8010a8)
+#define DPCR REG(0x1f8010f0)
+
+/* The frame's primitives: a chain of packets, each "next | words << 24". */
+uint32_t ot_packets[32];
+volatile uint32_t crash_ptr = 0x80010002; /* unaligned on purpose */
 
 static void gp0_wait(void) { while (!(GPUSTAT & (1u << 26))) ; }
 
@@ -87,6 +98,56 @@ static void spu_init(void) {
   SPU16(0x008) = 0x80ff; SPU16(0x00a) = 0x1fc0;  /* ADSR: fast attack, sustain */
 }
 
+/* A 16x16 4-bit texture (a ring) at VRAM 640,0 and its CLUT at 640,480. */
+static void upload_texture_packed(void) {
+  gp0_wait();
+  GP0 = 0xa0000000; GP0 = (0u << 16) | 640; GP0 = (16u << 16) | 4;
+  for (int y = 0; y < 16; y++) {
+    for (int half = 0; half < 2; half++) {
+      uint32_t word = 0;
+      for (int i = 0; i < 8; i++) {
+        int x = half * 8 + i, dx = x - 8, dy = y - 8, d = dx * dx + dy * dy;
+        uint32_t c = d < 16 ? 2 : d < 49 ? 1 : 0;
+        word |= c << (i * 4);
+      }
+      GP0 = word;
+    }
+  }
+  /* CLUT: 0 transparent, 1 yellow, 2 white */
+  gp0_wait();
+  GP0 = 0xa0000000; GP0 = (480u << 16) | 640; GP0 = (1u << 16) | 16;
+  GP0 = (0x03ffu << 16) | 0x0000;
+  GP0 = 0x7fff;
+  for (int i = 0; i < 6; i++) GP0 = 0;
+}
+
+static void draw_chain(int x, int y) {
+  uint32_t *p = ot_packets;
+  uint32_t a0 = (uint32_t)&p[0], a1 = (uint32_t)&p[8], a2 = (uint32_t)&p[20];
+  /* gouraud triangle: 6 words */
+  p[0] = (6u << 24) | (a1 & 0xffffff);
+  p[1] = 0x300000ff; p[2] = (200u << 16) | 20;
+  p[3] = 0x0000ff00; p[4] = (230u << 16) | 60;
+  p[5] = 0x00ff0000; p[6] = (180u << 16) | 70;
+  /* textured 16x16 sprite, 4-bit, CLUT at 640,480: 3 words + texpage first */
+  p[8] = (4u << 24) | (a2 & 0xffffff);
+  p[9] = 0xe100000a;                       /* texpage x=640 (10*64), 4-bit */
+  p[10] = 0x7c808080;                      /* 16x16 textured sprite, no blend */
+  p[11] = ((uint32_t)(y - 24) << 16) | (uint32_t)(x + 8);
+  p[12] = ((480u << 6 | (640u >> 4)) << 16) | 0;
+  /* line: 3 words, end of chain */
+  p[20] = (3u << 24) | 0xffffff;
+  p[21] = 0x4000ffff; p[22] = (10u << 16) | 10; p[23] = (10u << 16) | 310;
+  (void)a0;
+  gp0_wait();
+  while (D2_CHCR & (1u << 24)) ;
+  GP1 = 0x04000002;                        /* DMA direction: CPU -> GP0 */
+  D2_MADR = a0 & 0xffffff;
+  D2_BCR = 0;
+  D2_CHCR = 0x01000401;                    /* linked list, from RAM, start */
+  while (D2_CHCR & (1u << 24)) ;
+}
+
 int main(void) {
   I_MASK = 0;
   GP1 = 0x00000000;            /* reset GPU */
@@ -103,6 +164,8 @@ int main(void) {
   JOY_MODE = 0x000d;
   JOY_BAUD = 0x0088;
   spu_init();
+  DPCR |= 0x800;                 /* enable DMA channel 2 (GPU) */
+  upload_texture_packed();
 
   for (;;) {
     vsync();
@@ -124,5 +187,8 @@ int main(void) {
     fill(0, 0, 320, 240, 0x402010);          /* dark blue background */
     uint32_t c = (b & (1 << 14)) ? 0x00ff00 : 0x0000ff; /* X held: green, else red */
     fill(box_x, box_y, 32, 32, c);
+    draw_chain(box_x, box_y);
+    if ((b & 0x0301) == 0x0301)         /* L2+R2+SELECT: unaligned load */
+      frame_count += *(volatile uint32_t *)crash_ptr;
   }
 }

@@ -25,6 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as psxMem from './psx-memory.mjs';
 import { findSymbols, loadSymbols, parseAddress } from './symbols.mjs';
 import { discFiles, exeInfo } from './disc.mjs';
+import { decodeLog } from './gpu.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..'); // the repo root (served to the browser)
@@ -35,6 +36,9 @@ const MIME = {
   '.data': 'application/octet-stream', '.bin': 'application/octet-stream',
   '.png': 'image/png', '.map': 'application/json',
 };
+
+/** The frame every launch and reset leaves the machine on (see _settle). */
+export const BOOT_FRAME = 10;
 
 /** Where the bundled OpenBIOS lives (served to the page; MIT, from PCSX-Redux). */
 export const OPENBIOS = path.join(ROOT, 'data', 'bios', 'openbios.bin');
@@ -130,6 +134,8 @@ export class EmuHarness {
     /** How the machine was booted: { bios, region, pad1, pad2, rom, exe? } */
     this.options = options;
     this.blockedRequests = blocked; // external URLs the page tried to fetch (blocked: offline)
+    /** The core has the ps1-test instrumentation (live memory, GPU log); set by launch. */
+    this.live = false;
   }
 
   /** Boot a disc image (.cue/.bin/.iso/.img) or a PS-EXE (.exe/.psx). Options:
@@ -221,24 +227,29 @@ export class EmuHarness {
     const system = await page.evaluate(() => { window.Emu.pause(); window.Emu.initAudio(); return window.Emu.system; });
     const options = { rom: absRom, bios: biosChoice, region, pad1, pad2, ...(exe ? { exe } : {}) };
     const emu = new EmuHarness({ host, shared: reuse, context, page, romToken, system, blocked, options });
+    emu.live = await page.evaluate(() => window.Emu.hasInstrumentation());
+    await emu._settle();
     if (exe) await page.evaluate(() => window.Emu.captureBoot());
-    await emu._analogOn();
     await emu.useSymbols(symbols === true ? await findSymbols(absRom) : symbols || null);
     return emu;
   }
 
-  /** Switch "analog" pads to analog mode: a DualShock goes analog on the
-   *  L1+R1+SELECT combo, which the core handles itself (the game never sees it). */
-  async _analogOn() {
-    for (const [i, p] of [this.options.pad1, this.options.pad2].entries()) {
-      if (p !== 'analog') continue;
-      const combo = ['L1', 'R1', 'SELECT'].map((b) => (i ? `P2:${b}` : b));
-      const f = await this.frameNum();
-      await this.setButtons(combo, true);
-      await this.waitUntilFrame(f + 2);
-      await this.setButtons(combo, false);
-      await this.waitUntilFrame(f + 3);
+  /** Bring a freshly booted (or reset) machine to frame BOOT_FRAME, the same
+   *  frame on every run: EmulatorJS starts the core on its own schedule, so the
+   *  frame it is paused on at first varies, and input sent then would land on
+   *  different frames. On the way, "analog" pads get their analog mode: a
+   *  DualShock goes analog on L1+R1+SELECT, which the core handles itself (the
+   *  game never sees it). */
+  async _settle() {
+    const start = Math.max(await this.frameNum(), BOOT_FRAME - 4);
+    await this.waitUntilFrame(start);
+    const combos = [this.options.pad1, this.options.pad2].flatMap((p, i) => (p === 'analog' ? ['L1', 'R1', 'SELECT'].map((b) => (i ? `P2:${b}` : b)) : []));
+    if (combos.length) {
+      await this.setButtons(combos, true);
+      await this.waitUntilFrame(start + 2);
+      await this.setButtons(combos, false);
     }
+    await this.waitUntilFrame(BOOT_FRAME);
   }
 
   /** Close the shared browser + server used by `reuse: true` harnesses. */
@@ -284,14 +295,13 @@ export class EmuHarness {
   stats() { return this.page.evaluate(() => window.Emu.stats); }
 
   /** Reset the game, like the console's reset button: memory cards and cheats
-   *  are kept, the clock restarts at frame 1 and waitFrames() counts from 0 again
-   *  (analog pads are switched to analog again, as at boot). A side-loaded EXE
-   *  restarts from where it was loaded. Deterministic: the same script gives the
-   *  same result. */
+   *  are kept and the clock restarts at BOOT_FRAME, as after launch (analog pads
+   *  are switched to analog again). A side-loaded EXE restarts from where it was
+   *  loaded. Deterministic: the same script gives the same result. */
   async restart() {
     this._state = null;
     await this.page.evaluate(() => window.Emu.reset());
-    if (this.options.exe) await this._analogOn();
+    if (!this.options.exe) await this._settle();
   }
 
   /** PNG of the current frame → Buffer (and written to `outPath` if given).
@@ -345,7 +355,11 @@ export class EmuHarness {
   /** Read `length` bytes at a PS1 address: RAM (0x80000000-0x801FFFFF, or its
    *  0x00…/0xA0… mirrors), the scratchpad (0x1F800000-0x1F8003FF), I/O ports
    *  (0x1F801000-0x1F802FFF) or the BIOS (0xBFC00000). Reflects the current frame. */
-  async readMemory(addr, length = 1) { return this._mem.readMemory(await this._rawState(), this.addr(addr), length); }
+  async readMemory(addr, length = 1) {
+    addr = this.addr(addr);
+    if (this.live) return Buffer.from(await this.page.evaluate((r) => window.Emu.liveReadRuns(r), psxMem.liveRuns(addr, length)), 'base64');
+    return this._mem.readMemory(await this._rawState(), addr, length);
+  }
   async readU8(addr) { return (await this.readMemory(addr, 1)).readUInt8(0); }
   async readU16(addr) { return (await this.readMemory(addr, 2)).readUInt16LE(0); }
   async readU32(addr) { return (await this.readMemory(addr, 4)).readUInt32LE(0); }
@@ -357,6 +371,13 @@ export class EmuHarness {
   async writeMemory(addr, data) {
     addr = this.addr(addr);
     const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (this.live) {
+      const runs = psxMem.liveRuns(addr, bytes.length);
+      if (runs.some((r) => r[0] === psxMem.LIVE.bios)) throw new Error('the BIOS is read-only');
+      this._state = null;
+      await this.page.evaluate(([r, b]) => window.Emu.liveWriteRuns(r, b), [runs, bytes.toString('base64')]);
+      return (await this.readMemory(addr, bytes.length)).equals(bytes);
+    }
     const state = Buffer.from(await this._rawState());
     this._mem.writeMemory(state, addr, bytes);
     await this._poke(state);
@@ -381,6 +402,22 @@ export class EmuHarness {
    *  cause, epc, badVaddr, exception }, interruptsEnabled, gte: { data[32],
    *  control[32] }, cycle }. */
   async readCpu() { return this._mem.cpu(await this._rawState()); }
+
+  // ---- GPU command capture (instrumented core) ----
+  /** Run `frames` frames (default 1) with the core logging every GPU command and
+   *  CPU exception, and decode it: { prims, env, exceptions, gp1, chains, stats,
+   *  overflow, frame } (see gpu.mjs decodeLog). Advances time like waitFrames. */
+  async captureFrame(frames = 1) {
+    if (!this.live) throw new Error('GPU capture needs the bundled ps1-test core (this core has no command log)');
+    const r = await this.readRegions();
+    const startEx = Array.from({ length: 8 }, (_, i) => r.gpuControl.readUInt32LE((0xe0 + i) * 4));
+    await this.page.evaluate(() => window.Emu.logCtl(true));
+    try { await this.waitFrames(frames); } finally {
+      var log = await this.page.evaluate(() => { const l = window.Emu.logRead(); window.Emu.logCtl(false); return l; });
+    }
+    const cap = decodeLog(Buffer.from(log.words, 'base64'), startEx);
+    return { ...cap, overflow: log.overflow, frame: await this.frameNum() };
+  }
 
   // ---- Memory cards ----
   /** The memory card in `slot` (1 or 2) as a 128 KB raw image (.mcr/.mcd), or
@@ -466,11 +503,11 @@ export class EmuHarness {
    *  (Screen conditions watch the displayed part of VRAM and the display
    *  registers, which is what the picture is made from.) → { met, frame } */
   async waitFor(cond, { maxFrames = 600, precise = false } = {}) {
-    const state = await this._rawState();
+    const state = this.live ? null : await this._rawState();
     let spec;
     if (cond.screen) {
       if (!['changed', 'stable'].includes(cond.screen)) throw new Error('screen must be "changed" or "stable"');
-      spec = { kind: 'video', mode: cond.screen, frames: cond.frames ?? 30, ranges: this._mem.videoRanges(state) };
+      spec = { kind: 'video', mode: cond.screen, frames: cond.frames ?? 30, ...(this.live ? { live: true } : { ranges: this._mem.videoRanges(state) }) };
     } else {
       const as = cond.as ?? 'u8';
       const width = { u8: 1, s8: 1, u16: 2, s16: 2, u32: 4, s32: 4 }[as];
@@ -478,7 +515,9 @@ export class EmuHarness {
       const op = cond.op ?? 'eq';
       if (!['eq', 'ne', 'gt', 'lt', 'gte', 'lte', 'changed'].includes(op)) throw new Error(`bad op ${op}`);
       if (op !== 'changed' && typeof cond.value !== 'number') throw new Error(`op ${op} needs a numeric value`);
-      spec = { kind: 'value', offsets: this._mem.stateOffsets(state, this.addr(cond.address), width), signed: as.startsWith('s'), op, value: cond.value };
+      const a = this.addr(cond.address);
+      spec = { kind: 'value', signed: as.startsWith('s'), op, value: cond.value,
+        ...(this.live ? { live: psxMem.liveRuns(a, width).flatMap(([w, o, n]) => Array.from({ length: n }, (_, i) => [w, o + i])) } : { offsets: this._mem.stateOffsets(state, a, width) }) };
     }
     this._state = null;
     return this.page.evaluate(([sp, m, p]) => window.Emu.waitFor(sp, m, p), [spec, maxFrames, precise]);

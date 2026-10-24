@@ -51,6 +51,9 @@
       pcsx_rearmed_memcard2: 'enabled',         // slot 2 exists, so it can be imported
       pcsx_rearmed_multitap: 'disabled',
       pcsx_rearmed_analog_combo: 'l1+r1+select', // the driver's analog switch (never seen by the game)
+      // Raise address-error / bus-error exceptions as the console does, so code
+      // that would crash on hardware crashes here too (and check can see it).
+      pcsx_rearmed_exception_emulation: 'enabled',
     };
     // The controller types go in a RetroArch remap file for the core (where
     // RetroArch keeps input_libretro_device_pN), written with the core's config
@@ -435,31 +438,31 @@
     // Reset (like the console's reset button; memory cards are kept). The core
     // applies a queued reset before running its next frame, so after exactly one
     // counted frame the machine is "reset + 1 frame": put the clock at 1 and the
-    // wait target back to 0, as after a fresh boot.
+    // wait target back to 0, as after a fresh boot (the driver then runs it to
+    // its fixed boot frame).
     // A side-loaded PS-EXE has no disc to boot from after a real reset (the BIOS
-    // would sit in its shell), so for an EXE "reset" restores the machine as it
-    // was when the EXE started (captureBoot) instead: the same program restart.
+    // would sit in its shell), so for an EXE "reset" restores the machine (and
+    // picture) as it was when the EXE started (captureBoot): the same restart.
     Emu._boot = null;
-    Emu.captureBoot = () => { Emu._boot = { state: gm().getState(), frame: Emu.frameNum() }; };
+    Emu.captureBoot = async () => {
+      const png = await captureScreen();
+      Emu._boot = { state: gm().getState(), frame: Emu.frameNum(), png };
+      Emu._screen = png;
+    };
     Emu.reset = async () => {
       setFF(false);
       Emu.pause();
       if (Emu._boot) {
         await restore(Emu._boot.state, Emu._boot.frame);
-        Emu.resume();
-        while (Emu.frameNum() < Emu._boot.frame + 1) await raf();
-        Emu.pause();
-        // The clock reads as it did one frame after the EXE started.
-        Emu._target = 0;
-        Emu._advanced();
+        Emu._target = Emu._boot.frame;
+        Emu._screen = Emu._boot.png;
         return;
-      } else {
-        gm().restart();
-        const c = gm().getFrameNum();
-        Emu.resume();
-        while (gm().getFrameNum() <= c) await raf();
-        Emu.pause();
       }
+      gm().restart();
+      const c = gm().getFrameNum();
+      Emu.resume();
+      while (gm().getFrameNum() <= c) await raf();
+      Emu.pause();
       Emu._offset = gm().getFrameNum() - 1;
       Emu._target = 0;
       Emu._advanced();
@@ -496,8 +499,25 @@
         if (spec.signed && v >= 2 ** (bits - 1)) v -= 2 ** bits;
         return v;
       };
-      const measure = (u8) => (spec.kind === 'video' ? fnv(u8) : val(u8));
-      const start = measure(gm().getState());
+      // Live memory (instrumented core): read the bytes in place; otherwise
+      // from a save state each frame.
+      const liveFnv = () => {
+        let h = 0x811c9dc5;
+        const v = area(2);
+        for (let i = 0; i < v.length; i += 4) h = Math.imul(h ^ (v[i] | (v[i + 1] << 8) | (v[i + 2] << 16) | (v[i + 3] << 24)), 16777619);
+        return h >>> 0;
+      };
+      const liveVal = () => {
+        let v = 0;
+        for (let i = spec.live.length - 1; i >= 0; i--) v = v * 256 + area(spec.live[i][0])[spec.live[i][1]];
+        const bits = spec.live.length * 8;
+        if (spec.signed && v >= 2 ** (bits - 1)) v -= 2 ** bits;
+        return v;
+      };
+      const measure = spec.live
+        ? () => (spec.kind === 'video' ? liveFnv() : liveVal())
+        : (u8) => (spec.kind === 'video' ? fnv(u8) : val(u8));
+      const start = spec.live ? measure() : measure(gm().getState());
       const cmp = {
         eq: (v) => v === spec.value, ne: (v) => v !== spec.value, gt: (v) => v > spec.value,
         lt: (v) => v < spec.value, gte: (v) => v >= spec.value, lte: (v) => v <= spec.value,
@@ -514,8 +534,9 @@
       Emu.resume();
       for (;;) {
         const f = Emu.frameNum();
-        const u8 = gm().getState();
-        const m = measure(u8);
+        // A state per frame only when fast-forwarding (to rewind to) or reading from states.
+        const u8 = !spec.live || (fast && !stable) ? gm().getState() : null;
+        const m = spec.live ? measure() : measure(u8);
         if (stable) {
           if (m !== last) { last = m; lastChange = f; }
           if (f - lastChange >= spec.frames) return done(true);
@@ -552,6 +573,39 @@
       return { base64: u8ToB64(M.HEAPU8.subarray(ptr, ptr + size)), size };
     };
     Emu.hasMemoryAccess = () => Emu.readSystemRam() !== null;
+
+    // ---- ps1-test core instrumentation ----
+    // The bundled core is built with core/pcsx_rearmed-ps1test.patch: a log of the
+    // GPU commands (and CPU exceptions) of the frames run while it's on, and
+    // pointers to the emulated RAM / scratchpad+I/O / VRAM / BIOS. A stock core
+    // lacks these and the harness falls back to save-state parsing.
+    const M = () => gm().Module;
+    Emu.hasInstrumentation = () => typeof M()._ps1test_log_ctl === 'function';
+    Emu.logCtl = (on) => { if (Emu.hasInstrumentation()) M()._ps1test_log_ctl(on ? 1 : 0); };
+    /** The log as { words: base64 (LE u32s), overflow }, or null. */
+    Emu.logRead = () => {
+      if (!Emu.hasInstrumentation()) return null;
+      const ptr = M()._ps1test_log_buf(), n = M()._ps1test_log_len();
+      return { words: u8ToB64(M().HEAPU8.subarray(ptr, ptr + n * 4)), overflow: !!(M()._ps1test_log_flags() & 2) };
+    };
+    // Live memory: 0 RAM (2 MB), 1 scratchpad + I/O (64 KB), 2 VRAM (1 MB), 3 BIOS.
+    const AREA_SIZE = [0x200000, 0x10000, 0x100000, 0x80000];
+    const area = (which) => { const p = M()._ps1test_ptr(which); return p ? M().HEAPU8.subarray(p, p + AREA_SIZE[which]) : null; };
+    Emu.liveRead = (which, off, len) => { const a = Emu.hasInstrumentation() && area(which); return a ? u8ToB64(a.subarray(off, off + len)) : null; };
+    /** runs: [[area, offset, length]] → base64 of the bytes, in order. */
+    Emu.liveReadRuns = (runs) => {
+      const out = new Uint8Array(runs.reduce((n, r) => n + r[2], 0));
+      let o = 0;
+      for (const [w, off, len] of runs) { out.set(area(w).subarray(off, off + len), o); o += len; }
+      return u8ToB64(out);
+    };
+    /** Write bytes (base64) over the runs, on the paused machine. The picture is
+     *  unchanged (the next frame shows any effect). */
+    Emu.liveWriteRuns = (runs, b64) => {
+      const bytes = b64ToU8(b64);
+      let o = 0;
+      for (const [w, off, len] of runs) { area(w).set(bytes.subarray(o, o + len), off); o += len; }
+    };
 
     // ---- Memory cards ----
     // Slot 1 is the core's save RAM (EmulatorJS's .srm file); slot 2 is a file the

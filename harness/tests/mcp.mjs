@@ -59,7 +59,7 @@ try {
   ok('load_disc EXE (relative to root)', !r.isError && r.structuredContent.bios === 'openbios' && /OpenBIOS, NTSC/.test(textOf(r)), textOf(r));
   ok('load_disc reports symbols', /symbols from hello\.elf/.test(textOf(r)));
   r = await call('wait_frames', { frames: 60 });
-  ok('wait_frames lands exactly', r.structuredContent.frame === 60, `frame ${r.structuredContent.frame}`);
+  ok('wait_frames lands exactly', r.structuredContent.frame === 70, `frame ${r.structuredContent.frame}`);
   r = await call('screenshot');
   let [img] = images(r);
   ok('screenshot defaults to 2x (640x480)', img && img.width === 640 && img.height === 480, img && `${img.width}x${img.height}`);
@@ -70,11 +70,11 @@ try {
 
   // --- Concurrency: parallel calls are serialized ---
   const [w, f] = await Promise.all([call('wait_frames', { frames: 30 }), call('status')]);
-  ok('parallel calls run in order', w.structuredContent.frame === 90 && f.structuredContent.frame === 90, `${w.structuredContent.frame} / ${f.structuredContent.frame}`);
+  ok('parallel calls run in order', w.structuredContent.frame === 100 && f.structuredContent.frame === 100, `${w.structuredContent.frame} / ${f.structuredContent.frame}`);
 
   // --- Memory and CPU ---
   r = await call('read_memory', { address: 'frame_count', as: 'u32' });
-  ok('read_memory by symbol', !r.isError && r.structuredContent.values[0] === 90, textOf(r));
+  ok('read_memory by symbol', !r.isError && r.structuredContent.values[0] === 100, textOf(r));
   r = await call('read_memory', { address: '0x1F800000', length: 8 });
   ok('read_memory scratchpad (hex dump)', !r.isError && /0x1f800000: ([0-9a-f]{2} ){7}[0-9a-f]{2}/.test(textOf(r)), textOf(r));
   r = await call('read_memory', { address: 'nonsense' });
@@ -86,7 +86,7 @@ try {
 
   // --- Input ---
   r = await call('press', { button: 'RIGHT', hold: 10, release: 1 });
-  ok('press advances hold+release frames', r.structuredContent.frame === 101, `${r.structuredContent.frame}`);
+  ok('press advances hold+release frames', r.structuredContent.frame === 111, `${r.structuredContent.frame}`);
   r = await call('read_memory', { address: 'box_x', as: 'u16' });
   ok('press moved the box', r.structuredContent.values[0] === 30, textOf(r));
   r = await call('set_button', { button: 'CROSS', pressed: true });

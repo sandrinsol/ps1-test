@@ -178,7 +178,9 @@ and `exe.mjs` turns an `.elf` into a PS-EXE.
 
 - **Deterministic.** The same steps give bit-identical frames and RAM on every run.
   Advance time only with waits; the machine is paused between calls, so real time
-  between them doesn't matter and every read lands on the exact frame.
+  between them doesn't matter and every read lands on the exact frame. Every load
+  and reset leaves the machine on frame 10 (`BOOT_FRAME`), so input sent right
+  after a load always lands on the same frame.
 - **Fast-forward.** Waits longer than 120 frames run at 8× and finish at 1×, with
   identical results. Turn it off with `fast: false`.
 - **BIOS.** OpenBIOS (bundled, MIT) is the default; discs boot through it in about
@@ -187,6 +189,9 @@ and `exe.mjs` turns an `.elf` into a PS-EXE.
 - **Reset** is the console's reset button: memory cards and cheats survive. A disc
   boots again; a side-loaded EXE restarts from the moment it was loaded (a real
   reset would leave the BIOS in its shell, with no disc to boot).
+- **Exceptions are emulated**, as on the console: an unaligned or bad-address
+  load or store raises an address/bus error instead of quietly working, so code
+  that would crash on hardware crashes here too.
 - **Writes to memory** apply on the current frame. A value the game recomputes every
   frame is overwritten on the next one; `write_memory` says when that happens.
 - **Save states** don't store the picture. Loading a state file from another session
@@ -200,8 +205,17 @@ and `exe.mjs` turns an `.elf` into a PS-EXE.
 `page.html` loads EmulatorJS in a headless page and exposes a small control bridge.
 `driver.mjs` serves the repo over localhost (a `.cue` and its tracks as one zip,
 which EmulatorJS unpacks), starts Chromium with software WebGL, and calls the
-bridge. Memory, registers and VRAM are read from (and written into) the core's save
-states: `psx-memory.mjs` parses pcsx_rearmed's format.
+bridge.
+
+The bundled core is EmulatorJS's PCSX-ReARMed build with a small patch
+([`core/pcsx_rearmed-ps1test.patch`](../core/pcsx_rearmed-ps1test.patch), rebuilt
+by `core/build-core.sh` and the `core` workflow): it exports pointers to the
+emulated RAM, scratchpad, I/O, VRAM and BIOS, so memory is read and written in
+place, and it logs every GPU command (with the RAM address of each DMA-chain
+packet) and CPU exception while the harness asks it to: `gpu.mjs` decodes that log
+into primitives. Registers, VRAM for images, and anything the stock core can't
+give come from the core's save states: `psx-memory.mjs` parses pcsx_rearmed's format
+(and the harness falls back to it entirely with a stock core).
 
 ## Development
 

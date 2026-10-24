@@ -84,6 +84,29 @@ function locate(r, addr) {
   throw new Error(`address 0x${a.toString(16)} is not in RAM, the scratchpad, I/O or the BIOS`);
 }
 
+/** Live-memory areas of the instrumented core (page.html Emu.liveRead). */
+export const LIVE = { ram: 0, hw: 1, vram: 2, bios: 3 };
+
+/** `length` bytes at a PS1 address as runs in the live areas:
+ *  [[area, offset, length], …] (contiguous bytes in one area are one run). */
+export function liveRuns(addr, length) {
+  const runs = [];
+  for (let i = 0; i < length; i++) {
+    const a = (addr + i) >>> 0;
+    const phys = (a >>> 29) === 4 || (a >>> 29) === 5 ? a & 0x1fffffff : a;
+    let area, off;
+    if (phys < 0x00800000) { area = LIVE.ram; off = phys & 0x1fffff; }
+    else if (phys >= 0x1f800000 && phys < 0x1f800400) { area = LIVE.hw; off = phys - 0x1f800000; }
+    else if (phys >= 0x1f801000 && phys < 0x1f803000) { area = LIVE.hw; off = phys - 0x1f800000; }
+    else if (phys >= 0x1fc00000 && phys < 0x1fc80000) { area = LIVE.bios; off = phys - 0x1fc00000; }
+    else throw new Error(`address 0x${a.toString(16)} is not in RAM, the scratchpad, I/O or the BIOS`);
+    const last = runs[runs.length - 1];
+    if (last && last[0] === area && last[1] + last[2] === off) last[2]++;
+    else runs.push([area, off, 1]);
+  }
+  return runs;
+}
+
 /** Read `length` bytes at a PS1 address from a parsed state (or raw state buffer). */
 export function readMemory(stateOrParsed, addr, length = 1) {
   const r = Buffer.isBuffer(stateOrParsed) ? parseState(stateOrParsed) : stateOrParsed;

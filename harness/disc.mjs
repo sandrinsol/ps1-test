@@ -239,3 +239,63 @@ export async function makeDisc({ exe, out, label = 'PS1TEST', exeName = 'MAIN.EX
   await writeFile(cue, `FILE "${path.basename(bin)}" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n`);
   return { bin, cue, exe: info };
 }
+
+// ---- Reading discs ----
+
+/** The data of a 2048-byte sector of an image (Mode 1/2 2352-byte or 2048-byte). */
+function sectorReader(img) {
+  const raw = img.length % 2352 === 0 && img.length >= 17 * 2352;
+  const mode2 = raw && img[16 * 2352 + 15] === 2;
+  return (lba) => raw ? img.subarray(lba * 2352 + (mode2 ? 24 : 16), lba * 2352 + (mode2 ? 24 : 16) + 2048) : img.subarray(lba * 2048, lba * 2048 + 2048);
+}
+
+/** The data track of a disc (a .cue's first BINARY file, or the image itself). */
+export async function dataTrack(absRom) {
+  if (/\.cue$/i.test(absRom)) {
+    const cue = await readFile(absRom, 'utf8');
+    const m = /^\s*FILE\s+(?:"([^"]+)"|(\S+))/im.exec(cue);
+    if (!m) throw new Error(`${path.basename(absRom)} names no FILE`);
+    return readFile(path.resolve(path.dirname(absRom), m[1] ?? m[2]));
+  }
+  return readFile(absRom);
+}
+
+/** A file from an ISO 9660 image's root (or a path like "DIR/FILE.EXE"), or null. */
+export function isoFile(img, name) {
+  const sec = sectorReader(img);
+  const pvd = sec(16);
+  if (pvd.toString('latin1', 1, 6) !== 'CD001') return null;
+  let lba = pvd.readUInt32LE(156 + 2), size = pvd.readUInt32LE(156 + 10);
+  const parts = name.toUpperCase().replace(/^[\\/]+/, '').split(/[\\/]/);
+  for (let pi = 0; pi < parts.length; pi++) {
+    const want = parts[pi].replace(/;1$/, '');
+    let found = null;
+    for (let s = 0; s < Math.ceil(size / 2048) && !found; s++) {
+      const d = sec(lba + s);
+      for (let o = 0; o < 2048 && d[o];) {
+        const len = d[o], nl = d[o + 32];
+        const n = d.toString('latin1', o + 33, o + 33 + nl).replace(/;1$/, '');
+        if (n.toUpperCase() === want) found = { lba: d.readUInt32LE(o + 2), size: d.readUInt32LE(o + 10), dir: !!(d[o + 25] & 2) };
+        o += len;
+      }
+    }
+    if (!found) return null;
+    ({ lba, size } = found);
+    if (pi === parts.length - 1) {
+      if (found.dir) return null;
+      const out = Buffer.alloc(size);
+      for (let s = 0; s * 2048 < size; s++) sec(lba + s).copy(out, s * 2048, 0, Math.min(2048, size - s * 2048));
+      return out;
+    }
+  }
+  return null;
+}
+
+/** SYSTEM.CNF of a disc → { boot, tcb, event, stack, raw } (null if missing). */
+export function systemCnf(img) {
+  const f = isoFile(img, 'SYSTEM.CNF');
+  if (!f) return null;
+  const raw = f.toString('latin1');
+  const get = (k) => new RegExp(`^\\s*${k}\\s*=\\s*(\\S+)`, 'im').exec(raw)?.[1] ?? null;
+  return { boot: get('BOOT'), tcb: get('TCB'), event: get('EVENT'), stack: get('STACK'), raw };
+}
