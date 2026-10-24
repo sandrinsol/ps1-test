@@ -36,7 +36,7 @@ try {
   const names = tools.map((t) => t.name);
   const ALL = ['load_disc', 'wait_frames', 'press', 'set_button', 'set_analog', 'wait_until', 'reset', 'screenshot',
     'read_memory', 'read_cpu', 'gpu_capture', 'view_vram', 'describe', 'status', 'write_memory', 'state', 'cheats',
-    'memory_card', 'run_sequence', 'record_video', 'assert_golden', 'export_script', 'ab_compare', 'ram_search', 'build', 'check'];
+    'memory_card', 'run_sequence', 'record_video', 'assert_golden', 'export_script', 'ab_compare', 'ram_search', 'build', 'check', 'new_project'];
   for (const n of ALL) ok(`tool listed: ${n}`, names.includes(n));
   ok('exactly the documented tools', names.length === ALL.length, `${names.length}: ${names.filter((n) => !ALL.includes(n)).join(', ')}`);
   ok('screenshot is annotated read-only', tools.find((t) => t.name === 'screenshot').annotations?.readOnlyHint === true);
@@ -213,6 +213,14 @@ try {
   ok('memory_card format', !r.isError, textOf(r));
   r = await call('memory_card', { action: 'list', slot: 2 });
   ok('memory_card list on a blank card', !r.isError && /0 save\(s\), 15 free/.test(textOf(r)), textOf(r));
+
+  // --- The bundled demo ---
+  r = await call('load_disc', { path: 'demo/demo.cue' });
+  ok('the demo loads with its symbols', !r.isError && /symbols from demo\.elf/.test(textOf(r)), textOf(r));
+  r = await call('wait_until', { address: 'frame_count', as: 'u32', op: 'gte', value: 30, maxFrames: 900 });
+  ok('the demo boots from disc through OpenBIOS', r.structuredContent.met, textOf(r));
+  r = await call('check', { frames: 30 });
+  ok('check: the demo has no errors or warnings', r.structuredContent.errors === 0 && r.structuredContent.warnings === 0, textOf(r));
 
   // --- Analog via MCP ---
   r = await call('load_disc', { path: EXE, pad1: 'analog' });

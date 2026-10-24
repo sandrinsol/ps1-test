@@ -65,6 +65,40 @@ jobs:
           path: harness/out/
           if-no-files-found: ignore
 
+  template:
+    # templates/psn00bsdk built with PSn00bSDK and driven through the MCP server
+    # (new_project, build, its smoke test, check).
+    name: psn00bsdk template
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: harness
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: harness/package-lock.json
+      - name: Cache PSn00bSDK
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: /opt/psn00bsdk
+          key: psn00bsdk-v0.24-${{ hashFiles('templates/psn00bsdk/.devcontainer/install-psn00bsdk.sh', 'templates/psn00bsdk/.devcontainer/elf2x-ptload.patch') }}
+      - name: Install the MIPS toolchain and PSn00bSDK
+        run: |
+          if [ "${{ steps.sdk.outputs.cache-hit }}" = true ]; then
+            sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu binutils-mipsel-linux-gnu ninja-build
+          else
+            sudo ../templates/psn00bsdk/.devcontainer/install-psn00bsdk.sh /opt/psn00bsdk
+          fi
+          echo "PSN00BSDK_LIBS=/opt/psn00bsdk/lib/libpsn00b" >> "$GITHUB_ENV"
+          echo "/opt/psn00bsdk/bin" >> "$GITHUB_PATH"
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - run: node tests/template.mjs
+
   fixtures:
     # The committed test fixtures must match their sources.
     name: fixtures rebuild

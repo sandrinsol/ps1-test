@@ -1,0 +1,13 @@
+{
+  "rom": "build/game.cue",
+  "steps": [
+    { "waitUntil": { "address": "frame_count", "as": "u32", "op": "gte", "value": 30 }, "maxFrames": 900 },
+    { "assertRam": "player_x", "as": "s16", "equals": 152 },
+    { "assert": "goldens/title.png", "ignore": [{ "x": 16, "y": 32, "w": 288, "h": 8 }] },
+    { "hold": "RIGHT", "frames": 20 },
+    { "assertRam": "player_x", "as": "s16", "equals": 192 },
+    { "hold": "UP", "frames": 10 },
+    { "assertRam": "player_y", "as": "s16", "equals": 140 },
+    { "assert": "goldens/moved.png", "ignore": [{ "x": 16, "y": 32, "w": 288, "h": 8 }] }
+  ]
+}

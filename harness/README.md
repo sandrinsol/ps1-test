@@ -8,6 +8,9 @@ downloaded at runtime.
 - `mcp-server.mjs` — MCP server for agents (Claude Code, Cursor, VS Code, …).
 - `driver.mjs` — the same features as a Node library, for scripts and CI.
 - `runner.mjs` — runs a JSON step script from the command line (for CI).
+- A PSn00bSDK starter game that builds, runs and passes a test from the start
+  ([`templates/psn00bsdk`](../templates/psn00bsdk)), and the same game as a ready
+  disc in [`demo/`](../demo).
 
 ## Setup
 
@@ -73,6 +76,7 @@ VS Code uses the key `"servers"` instead of `"mcpServers"`.
 | `ab_compare` | Run the same steps on two discs/EXEs and report differences. |
 | `ram_search` | Find where a value (HP, score…) is stored: `start`, then `filter` until one address is left. |
 | `build` | Run the project's build (CMake, make, or `ps1test.json`), report compiler errors as `file:line: error: …`, load the new disc/EXE with its symbols. |
+| `new_project` | Copy a starter template (`psn00bsdk`): text, a player sprite, a GTE cube, a smoke test with goldens, `ps1test.json`, a CI workflow and a dev container. |
 | `check` | Hardware rules: the PS-EXE header and `SYSTEM.CNF` (region marker, load address, entry, size), then a short run watching for CPU exceptions (unaligned or bad addresses, bus errors, …, with the faulting function), hangs, lag frames (`frameCounter`), CPU load (`cpu_usage`), a blank or frozen screen, polygons the GPU drops (> 1023×511), primitives outside the drawing area, textures and CLUTs inside the framebuffer, all-zero CLUTs, DMA from outside RAM, unaligned DMA chains, and the stack reaching the program's data. |
 
 Prompts: `smoke_test_rom`, `regression_check`, `find_ram_address`,
@@ -81,6 +85,9 @@ Prompts: `smoke_test_rom`, `regression_check`, `find_ram_address`,
 **Token use.** Tool definitions are sent with every request; `PS1TEST_TOOLS=core`
 exposes a smaller set. A 2× screenshot is ~410 tokens. Prefer one `run_sequence`
 over many single calls, and `wait_until` over wait-and-check loops.
+
+Start a game from the template with `new_project`, or from the clone:
+`node harness/mcp-server.mjs new psn00bsdk <dir>`.
 
 ## Buttons
 
@@ -233,7 +240,8 @@ give come from the core's save states: `psx-memory.mjs` parses pcsx_rearmed's fo
 ## Development
 
 ```bash
-npm test               # all suites (unit, core, script, mcp)
+npm test               # all suites (unit, core, script, mcp, template — skipped without PSn00bSDK)
 npm run typecheck      # JSDoc types
 npm run fixtures       # rebuild tests/fixtures from src/ (needs a mipsel GCC)
+PSN00BSDK_LIBS=… node tests/template.mjs   # the template end to end (needs PSn00bSDK)
 ```

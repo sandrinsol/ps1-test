@@ -41,6 +41,9 @@
       transition: background .15s;
     }
     label.btn:hover { background: #6d63ff; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+    button.btn { font: inherit; border: 1px solid #5a4fff; background: transparent; color: #e6e6ee; padding: 12px 22px; border-radius: 10px; cursor: pointer; font-weight: 600; }
+    button.btn:hover { background: #24243a; }
     small { color: #8a8a9a; line-height: 1.5; }
     fieldset { border: 1px solid #33334a; border-radius: 10px; padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 10px 16px; justify-content: center; }
     legend { color: #8a8a9a; font-size: 13px; padding: 0 6px; }
@@ -59,10 +62,13 @@
   <h1>PS1 Emulator</h1>
 
   <div id="picker">
-    <label class="btn">
-      Load disc or EXE
-      <input id="rom" type="file" accept=".cue,.bin,.iso,.img,.exe,.psx,.pbp,.zip,.7z" multiple hidden />
-    </label>
+    <div class="row">
+      <label class="btn">
+        Load disc or EXE
+        <input id="rom" type="file" accept=".cue,.bin,.iso,.img,.exe,.psx,.pbp,.zip,.7z" multiple hidden />
+      </label>
+      <button id="demo" class="btn ghost" type="button">Try the demo</button>
+    </div>
     <small>
       Pick a disc image (<code>.cue</code> together with its <code>.bin</code> files, or a
       single <code>.bin</code>/<code>.iso</code>), a homebrew <code>.exe</code>, or a
@@ -127,6 +133,14 @@
         if (missing.length) { $('error').textContent = `${cue.name} needs ${missing.join(', ')} too: select the .cue and its track files together.`; return; }
         game = new File([await zipStore([cue, ...files.filter((f) => names.includes(f.name))])], cue.name.replace(/\.cue$/i, '.zip'));
       }
+      start(game, game.name.replace(/\.[^.]+$/, ''));
+    });
+
+    // The bundled demo (built from templates/psn00bsdk): a lone .bin, for which
+    // EmulatorJS writes its own .cue.
+    $('demo').addEventListener('click', () => start('demo/demo.bin', 'demo'));
+
+    function start(game, name) {
       const bios = document.querySelector('input[name=bios]:checked').value;
       if (bios === 'file' && !$('biosFile').files[0]) { $('error').textContent = 'Pick your BIOS file first.'; return; }
 
@@ -137,8 +151,8 @@
       // pcsx_rearmed core. Everything is served from the local data/ folder.
       window.EJS_player = '#game';
       window.EJS_core = 'psx';
-      window.EJS_gameName = game.name.replace(/\.[^.]+$/, '');
-      window.EJS_gameUrl = URL.createObjectURL(game);
+      window.EJS_gameName = name;
+      window.EJS_gameUrl = typeof game === 'string' ? game : URL.createObjectURL(game);
       window.EJS_pathtodata = 'data/';
       window.EJS_startOnLoaded = true;
       // The core finds a BIOS in its system folder by file name.
@@ -152,7 +166,7 @@
       const s = document.createElement('script');
       s.src = 'data/loader.js';
       document.body.appendChild(s);
-    });
+    }
   </script>
 </body>
 </html>
