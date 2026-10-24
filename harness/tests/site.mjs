@@ -34,7 +34,8 @@ try {
   const page = await context.newPage();
   const failures = [], errors = [];
   page.on('response', (r) => { if (r.status() >= 400) failures.push(`${r.status()} ${r.url()}`); });
-  page.on('pageerror', (e) => errors.push(e.message));
+  // EmulatorJS asks for a screen wake lock, which headless Chrome refuses: harmless.
+  page.on('pageerror', (e) => { if (!/Wake Lock/i.test(e.message)) errors.push(e.message); });
 
   const res = await page.goto(`${base}/index.html`);
   if (res?.status() === 401 && !bypass) {
