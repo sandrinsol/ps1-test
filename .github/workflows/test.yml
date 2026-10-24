@@ -91,7 +91,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /opt/psn00bsdk
-          key: psn00bsdk-v0.24-${{ hashFiles('templates/psn00bsdk/.devcontainer/install-psn00bsdk.sh', 'templates/psn00bsdk/.devcontainer/elf2x-ptload.patch') }}
+          key: psn00bsdk-v0.24-${{ hashFiles('templates/psn00bsdk/.devcontainer/install-psn00bsdk.sh', 'templates/psn00bsdk/.devcontainer/build-mips1-rt.sh', 'templates/psn00bsdk/.devcontainer/elf2x-ptload.patch') }}
       - name: Install the MIPS toolchain and PSn00bSDK
         run: |
           if [ "${{ steps.sdk.outputs.cache-hit }}" = true ]; then

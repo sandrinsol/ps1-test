@@ -19,4 +19,7 @@ cmake -S "$WORK/psn00bsdk" -B "$WORK/build" -G Ninja -DPSN00BSDK_TARGET=mipsel-l
 cmake --build "$WORK/build"
 cmake --install "$WORK/build"
 rm -rf "$WORK"
+# The compiler runtime (64-bit maths, soft-float) built for the PS1's MIPS I CPU:
+# this toolchain's own libgcc is MIPS32r2 with hard-float helpers.
+"$(cd "$(dirname "$0")" && pwd)/build-mips1-rt.sh" "$PREFIX"
 echo "PSn00bSDK $VERSION installed in $PREFIX: set PSN00BSDK_LIBS=$PREFIX/lib/libpsn00b and add $PREFIX/bin to PATH"

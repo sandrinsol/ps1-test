@@ -33,7 +33,8 @@ skills. Check:
    or data growing past ~1.9 MB, recursion, globals assumed zero without the C start
    code; `FlushCache()` after loading or patching code.
 8. **Toolchain**: anything that needs libgcc helpers (64-bit division, `__builtin_bswap`,
-   floats) on `mipsel-linux-gnu` without the MIPS I replacements.
+   floats) on `mipsel-linux-gnu` without libmips1rt linked ahead of libgcc (the
+   template does this; a custom CMakeLists may not).
 9. **Input**: buttons active-low; pad `stat`/`type` checked before use; analog
    fields read only for analog IDs.
 10. **CD and cards**: return values checked, retries on read errors, no busy-wait in
