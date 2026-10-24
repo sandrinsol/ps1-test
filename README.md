@@ -1,1 +1,46 @@
-# ps1-test
+# PS1 emulator + AI test harness
+
+Play PlayStation (PS1) games and homebrew in the browser, or let an AI agent test
+them through an MCP server. Everything runs offline from the bundled `data/` folder
+(EmulatorJS with the PCSX-ReARMed core, plus the free OpenBIOS, so no Sony BIOS is
+needed).
+
+- **Play:** see below.
+- **Make or test games with an AI agent:** see [harness/README.md](harness/README.md).
+
+## Play
+
+Browsers won't load the emulator from `file://`, so serve the folder:
+
+```bash
+python3 -m http.server 8000    # or double-click start.command on macOS
+```
+
+Open <http://localhost:8000>, click **Load disc or EXE** and pick a disc image (a
+`.cue` together with its `.bin` files, or a single `.bin`/`.iso`), a homebrew `.exe`
+or a `.zip`. Choose the bundled OpenBIOS, the built-in HLE BIOS, or your own BIOS
+dump (best compatibility; it never leaves your computer).
+
+| Action | Key |
+|--------|-----|
+| D-pad | Arrow keys |
+| Cross / Circle | X / Z |
+| Square / Triangle | S / A |
+| L1 / R1 | Q / E |
+| L2 / R2 | Tab / R |
+| Start / Select | Enter / V |
+| Left stick | T F G H |
+| Right stick | I J K L |
+
+The bar at the bottom has pause, save states, fullscreen, volume and settings
+(including gamepads and the controller type). Memory cards are kept in the
+browser's local storage.
+
+To host it, deploy the folder as a static site (no build step); `netlify.toml` is
+included for Netlify.
+
+## License
+
+GPL-3.0-or-later, as it bundles EmulatorJS (GPL-3.0) and PCSX-ReARMed (GPL-2.0+).
+See `LICENSE` and `NOTICE.md`. No BIOS dumps or commercial games are included;
+don't commit them.
