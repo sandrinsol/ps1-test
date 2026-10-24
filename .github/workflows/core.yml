@@ -29,7 +29,9 @@ jobs:
           for k in a:
               print(f"{k}: committed {a[k]}  built {b[k]}  {'same' if a[k] == b[k] else 'DIFFERENT'}")
           if a != b:
-              print('::warning::the rebuilt core differs from data/cores; if core/ changed, commit the artifact')
+              # Emscripten builds aren't bit-identical across machines, so this is a
+              # note, not a failure; when core/ changes, commit this job's artifact.
+              print('::notice::the rebuilt core differs byte-wise from data/cores (expected across machines); if core/ changed, commit the artifact')
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -43,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu g++-mipsel-linux-gnu
       - name: Rebuild at the committed commit
         run: core/build-openbios.sh "$(python3 -c "import json; print(json.load(open('data/bios/openbios.json'))['commit'])")"
       - name: Compare
