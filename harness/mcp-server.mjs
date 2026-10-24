@@ -11,7 +11,7 @@
 //   find     ram_search
 //   make     texture (PNG ↔ TIM, into VRAM), background (maps → tileset + map), data (VAG sound, tables, meshes)
 //   develop  build (compile + reload), check (hardware rules), new_project
-//   debug    debug (breakpoints, watchpoints, step, disassembly, call stack), profile
+//   debug    debug (breakpoints, watchpoints, step, disassembly, call stack), profile, spu, cd_log
 // Addresses can be symbol names when there is a symbol file (.elf/.map/.sym).
 // A ps1test.json in the workspace sets project defaults (build, rom, bios, watch).
 // The machine is paused between calls, so every read lands on an exact frame.
@@ -38,7 +38,7 @@ import { saveVideo } from './recording.mjs';
 import { RamSearch, SEARCH_OPS, SEARCH_TYPES } from './ramsearch.mjs';
 import { runSteps, decodeValues, encodeValue, VALUE_TYPES } from './steps.mjs';
 import { runCommand, parseDiagnostics, formatDiagnostic, detectBuild, findRom, readProjectConfig } from './build.mjs';
-import { discFiles, dataTrack } from './disc.mjs';
+import { discFiles, dataTrack, isoList } from './disc.mjs';
 import { primLine, captureImage, vramPng, texturePng, stateDrawEnv } from './gpu.mjs';
 import { display } from './psx-memory.mjs';
 import { listSaves, formatCard } from './mcard.mjs';
@@ -46,11 +46,13 @@ import { exeIssues, discIssues, RunChecker } from './checks.mjs';
 import { TEMPLATES, createProject } from './templates.mjs';
 import { convertTim, readTim, timToPng, timToC } from './tim.mjs';
 import { convertTilemap, writeTilemap, renderTiledMap } from './tilemap.mjs';
-import { encodeVag, writeSound, makeTable, writeTable, convertMesh, writeMesh } from './gamedata.mjs';
+import { encodeVag, writeSound, makeTable, writeTable, convertMesh, writeMesh, decodeAdpcm, encodeWav16 } from './gamedata.mjs';
 import { vramImage, outline } from './gpu.mjs';
 import { encodePng } from './png.mjs';
 import { REG_NAMES } from './mips.mjs';
 import { listing, callStack, profileByFunction } from './debugger.mjs';
+import { describeSpu, sampleAt, pitchToRate } from './spu.mjs';
+import { summarizeCd } from './cdrom.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(__dirname, 'out');
@@ -1138,6 +1140,62 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
     const sym = emu.symbols ? '' : '\n(no symbols: grouped by address; give load_disc a .elf/.map for names)';
     return result(`${r.total} samples every ${interval} cycles over ${frames} frames${p.full ? ' (buffer full: later frames not sampled)' : ''}:\n${lines.join('\n')}${more}${sym}`,
       { samples: r.total, top: r.funcs[0]?.name ?? null });
+  });
+
+  // ---- Sound and CD-ROM (instrumented core) ----
+  tool('spu', {
+    description: 'Sound chip: what each voice plays (start address, rate, envelope, volume) and why nothing is heard. sample: a voice\'s (or address\'s) ADPCM from SPU RAM → .wav.',
+    inputSchema: {
+      action: z.enum(['state', 'sample']).default('state'),
+      all: z.boolean().default(false).describe('list idle voices too'),
+      voice: z.number().int().min(0).max(23).optional(),
+      address: z.number().int().min(0).max(0x7fff0).optional().describe('SPU RAM byte offset (instead of voice)'),
+      save: z.string().optional().describe('.wav path for sample'),
+    },
+    annotations: RO,
+  }, async ({ action, all, voice, address, save }) => {
+    if (!emu.live) return errText('spu needs the bundled ps1-test core');
+    const st = await emu.spuState();
+    const regs = await emu.spuRead(0, 0x400, 'regs');
+    if (action === 'state') {
+      const d = describeSpu(st, regs, { all });
+      const lines = [`Frame ${await emu.frameNum()}: ${d.lines[0]}`, ...d.lines.slice(1), ...d.problems.map((p) => `PROBLEM: ${p}`)];
+      return result(lines.join('\n'), { playing: d.playing, problems: d.problems.length });
+    }
+    if (voice === undefined && address === undefined) return errText('sample needs `voice` or `address`');
+    const offset = address ?? regs.readUInt16LE(voice * 16 + 6) * 8;
+    const s = sampleAt(await emu.spuRead(0, 0x80000), offset & ~15);
+    const rate = voice !== undefined && st.voices[voice].pitch ? pitchToRate(st.voices[voice].pitch) : 22050;
+    const pcm = decodeAdpcm(s.adpcm);
+    let saved = '';
+    if (save) {
+      const abs = await writePath(save);
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, encodeWav16(pcm, rate));
+      saved = `, saved ${abs}`;
+    }
+    let peak = 0;
+    for (const v of pcm) peak = Math.max(peak, Math.abs(v));
+    return result(`Sample at SPU RAM ${hex(offset & ~15)}: ${s.adpcm.length / 16} block(s), ${pcm.length} samples (${(pcm.length / rate).toFixed(3)} s at ${rate} Hz), peak ${peak}, ${s.looped ? `loops${s.loopAt !== null ? ` from byte ${s.loopAt}` : ''}` : 'one-shot'}${saved}.`,
+      { blocks: s.adpcm.length / 16, samples: pcm.length, looped: s.looped, peak });
+  });
+
+  tool('cd_log', {
+    description: 'Run `frames` frames logging the CD-ROM drive: commands (with the calling function), answers, errors, and sector reads mapped to the disc\'s files.',
+    inputSchema: {
+      frames: z.number().int().min(1).max(3600).default(60),
+      list: z.number().int().min(1).max(1000).default(80).describe('lines to show'),
+    },
+  }, async ({ frames, list }) => {
+    if (!emu.live) return errText('cd_log needs the bundled ps1-test core');
+    let files = [];
+    if (!emu.options.exe) { try { files = isoList(await dataTrack(romPath)); } catch { files = []; } }
+    const log = await emu.cdLog(frames);
+    record({ wait: log.to - log.from });
+    const cyclesPerFrame = emu.options.region === 'pal' ? 677376 : 564480;
+    const s = summarizeCd(log.entries, { files, name: (a) => nameFn(a, { maxOffset: 0x10000 }), cyclesPerFrame, limit: list });
+    const head = `Frames ${log.from}-${log.to}: ${s.commands} command(s), ${s.sectors} sector(s) read, ${s.seeks} seek(s), ${s.errors} error(s)${log.overflow ? '; LOG FULL (later entries lost)' : ''}.${emu.options.exe ? ' (A side-loaded EXE: no disc in the drive.)' : ''}`;
+    return result(`${head}${s.text ? '\n' + s.text : ''}`, { commands: s.commands, sectors: s.sectors, errors: s.errors });
   });
 
   // ---- Status ----

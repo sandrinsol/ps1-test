@@ -56,8 +56,8 @@ rm -rf RetroArch EmulatorJS
 git clone "$RA_REPO" RetroArch
 git -C RetroArch checkout -q "$RA_COMMIT"
 # Export the harness's functions too.
-sed -i 's/_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply$/_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply, \\\n                     _ps1test_log_ctl,_ps1test_log_buf,_ps1test_log_len,_ps1test_log_flags,_ps1test_ptr/' RetroArch/Makefile.emulatorjs
-grep -q _ps1test_ptr RetroArch/Makefile.emulatorjs
+sed -i 's/_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply$/_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply, \\\n                     _ps1test_log_ctl,_ps1test_log_buf,_ps1test_log_len,_ps1test_log_flags,_ps1test_ptr, \\\n                     _ps1test_dbg_block,_ps1test_prof_buf,_ps1test_regs,_ps1test_step,_ps1test_spu_state,_ps1test_spu_ptr/' RetroArch/Makefile.emulatorjs
+grep -q _ps1test_spu_ptr RetroArch/Makefile.emulatorjs
 mkdir -p EmulatorJS/data/cores
 # WebGL 2 build, then the WebGL 1 ("legacy") one EmulatorJS falls back to.
 cp pcsx_rearmed/pcsx_rearmed_libretro_emscripten.bc RetroArch/emulatorjs/

@@ -5,7 +5,7 @@
   "retroarch": "6dd43539",
   "emscripten": "3.1.74",
   "sha256": {
-    "wasm": "fee0ef38479e39aa307065d3260ef4f0215df04de75ffffa6d18fdd727cc01bc",
-    "legacy-wasm": "58e05c17a937cf3ea17dcd9f92736fcd43d96049aca41736d2033a183385de40"
+    "wasm": "2370e9ecfe3e1797c5c6bfd9f2d622dda92d183c6d686cecee4d7036e3d4942a",
+    "legacy-wasm": "b6e35a4397c485a2a90c937810b18bb6072cc3d3416abe6debac714b94cc42bd"
   }
 }

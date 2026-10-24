@@ -440,7 +440,7 @@ index e82cc0e6..b3b1fd57 100644
 +}
 +EMSCRIPTEN_KEEPALIVE uint32_t *ps1test_log_buf(void) { return ps1test_log; }
 +EMSCRIPTEN_KEEPALIVE int ps1test_log_len(void) { return ps1test_log_used; }
-+EMSCRIPTEN_KEEPALIVE int ps1test_log_flags(void) { return ps1test_log_on | (ps1test_log_overflow << 1); }
++EMSCRIPTEN_KEEPALIVE int ps1test_log_flags(void) { return ps1test_log_on | (ps1test_log_overflow << 8); }
 +/* 0: main RAM (2 MB), 1: scratchpad + I/O (64 KB), 2: VRAM (1 MB), 3: BIOS (512 KB) */
 +EMSCRIPTEN_KEEPALIVE void *ps1test_ptr(int which)
 +{

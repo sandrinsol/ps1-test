@@ -1,7 +1,7 @@
 // Unit tests that need no emulator: PS-EXE parsing, ELF → EXE, the disc
 // builder (ISO 9660 + Mode 2 sectors with EDC), the zip writer, symbols,
-// build-output parsing, memory-card formats, and the debugger's disassembler,
-// call stack and profile grouping.
+// build-output parsing, memory-card formats, the debugger's disassembler,
+// call stack and profile grouping, the SPU view and the CD-ROM log decoder.
 //
 //   node tests/unit.mjs
 
@@ -22,6 +22,9 @@ import { encodePng, decodePng } from '../png.mjs';
 import { RunChecker } from '../checks.mjs';
 import { disasm, isReturnAddress } from '../mips.mjs';
 import { listing, callStack, profileByFunction } from '../debugger.mjs';
+import { describeSpu, sampleAt, pitchToRate } from '../spu.mjs';
+import { decodeCdLog, summarizeCd, msfToLba } from '../cdrom.mjs';
+import { isoList } from '../disc.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp } from 'node:fs/promises';
@@ -268,6 +271,55 @@ ok('decodeLog: exception', dec.exceptions[0]?.code === 4 && dec.exceptions[0].ba
   ok('profile: grouped by function, most first', p.total === 6 && p.funcs[0].name === 'main' && p.funcs[0].count === 3 && Math.round(p.funcs[0].pct) === 50);
   ok('profile: hot spots inside a function', p.funcs[0].hot[0].addr === 0x80010104 && p.funcs[0].hot[0].count === 2);
   ok('profile: BIOS and kernel without symbols', p.funcs.some((f) => f.name === '(BIOS ROM)') && p.funcs.some((f) => f.name === '(kernel)'));
+}
+
+// ---- SPU view ----
+{
+  const regs = Buffer.alloc(0x400);
+  regs.writeUInt16LE(0xc000, 0x1aa); regs.writeInt16LE(0x3fff, 0x180); regs.writeInt16LE(0x3fff, 0x182);
+  regs.writeUInt16LE(0x1000 >> 3, 6);       // voice 0 start
+  regs.writeUInt16LE(0x0800 >> 3, 16 + 6);  // voice 1 start, inside the reserved area
+  const voice = (i, o = {}) => ({ voice: i, current: 0, loop: 0, envelope: 0, adsr: 'release', noise: false, reverb: false, fmod: false, pitch: 0x800, volL: 0x3fff, volR: 0x3fff, ...o });
+  const st = { ctrl: 0xc000, audible: 0, keyedOn: 0, irqAddr: null, voices: Array.from({ length: 24 }, (_, i) => voice(i)) };
+  st.voices[0] = voice(0, { envelope: 0x7fffffff, adsr: 'sustain' });
+  let d = describeSpu(st, regs);
+  ok('spu: lists the playing voice with its rate and start', d.playing === 1 && d.lines.some((l) => /^voice 0: sustain env 100% .*\(22050 Hz\) start 0x1000/.test(l)) && !d.problems.length, d.lines.join(' | '));
+  st.voices[1] = voice(1, { envelope: 1 << 30, adsr: 'attack', volL: 0, volR: 0 });
+  regs.writeUInt16LE(0x8000, 0x1aa); regs.writeInt16LE(0, 0x180); regs.writeInt16LE(0, 0x182);
+  d = describeSpu(st, regs);
+  ok('spu: explains silence (muted, main volume 0, voice volume 0, reserved area)', ['muted', 'main volume is 0', 'voice 1 plays at volume 0', 'reserved area'].every((w) => d.problems.some((p) => p.includes(w))), d.problems.join(' | '));
+  ok('spu: idle voices only with all', describeSpu(st, regs, { all: true }).lines.length === 25 && describeSpu(st, regs).lines.length === 3);
+  ok('spu: pitch → rate', pitchToRate(0x1000) === 44100 && pitchToRate(0x800) === 22050);
+  const ram = Buffer.alloc(0x2000);
+  ram[0x1001] = 4; ram[0x1011] = 0; ram[0x1021] = 3;   // loop start, middle, end + repeat
+  const smp = sampleAt(ram, 0x1000);
+  ok('spu: a sample runs to its end flag', smp.adpcm.length === 48 && smp.loopAt === 0 && smp.looped);
+  ram[0x1021] = 1;
+  ok('spu: a one-shot sample', sampleAt(ram, 0x1000).looped === false);
+}
+
+// ---- CD-ROM log ----
+{
+  const words = [];
+  const entry = (type, cycle, data) => { words.push(((type << 28) | data.length) >>> 0, cycle, ...data); };
+  entry(5, 1000, [0x02 | (3 << 8), 0x240200, 0, 0, 0, 0x80010100]);  // Setloc 00:02:24
+  entry(6, 1100, [3 | (2 << 8) | (1 << 24), 0x02, 0, 0, 0]);                // INT3, stat 02
+  entry(5, 1200, [0x06, 0, 0, 0, 0, 0x80010100]);                            // ReadN
+  entry(7, 2000, [0x00 | (0x02 << 8) | (24 << 16)]);                         // sector 00:02:24
+  entry(6, 2001, [1 | (6 << 8) | (1 << 24), 0x22, 0, 0, 0]);                 // INT1 (folded)
+  entry(7, 3000, [0x00 | (0x02 << 8) | (25 << 16)]);
+  entry(1, 3001, [0, 0]);                                                    // a GPU entry: skipped
+  entry(6, 4000, [5 | (6 << 8) | (2 << 24), 0x03, 0, 0, 0]);                 // INT5 error
+  const buf = Buffer.from(new Uint32Array(words).buffer);
+  const log = decodeCdLog(buf);
+  ok('cd log: decodes commands, interrupts and reads', log.length === 7 && log[0].name === 'Setloc' && log[0].params.join() === '0,2,36' && log[3].type === 'read' && log[3].lba === 24, JSON.stringify(log[0]));
+  ok('cd log: MSF → sector', msfToLba(0, 2, 0) === 0 && msfToLba(0, 2, 24) === 24 && msfToLba(1, 0, 0) === 4350);
+  const s = summarizeCd(log, { files: [{ path: '/MAIN.EXE', lba: 24, size: 4096, dir: false }], name: (a) => (a === 0x80010100 ? 'cd_read' : null), cyclesPerFrame: 1000 });
+  ok('cd log: Setloc names the sector, the file and the caller', /Setloc 00:02:24 = sector 24 \(\/MAIN\.EXE\)  \[from cd_read\]/.test(s.text), s.text);
+  ok('cd log: consecutive reads fold into one run in a file', /read 2 sector\(s\) 24-25 \(00:02:24\) \/MAIN\.EXE/.test(s.text) && !/INT1/.test(s.text));
+  ok('cd log: totals and errors', s.commands === 2 && s.sectors === 2 && s.seeks === 1 && s.errors === 1 && /INT5 error stat 03 \(error,motor\)/.test(s.text), JSON.stringify({ ...s, text: undefined }));
+  const files = isoList(await readFile(path.join(FIX, 'hello.bin')));
+  ok('isoList: the fixture disc\'s files', files.some((f) => f.path === '/SYSTEM.CNF' && !f.dir) && files.some((f) => f.path === '/MAIN.EXE' && f.size > 0), files.map((f) => f.path).join(', '));
 }
 
 done();
