@@ -229,7 +229,10 @@ ok('decodeLog: exception', dec.exceptions[0]?.code === 4 && dec.exceptions[0].ba
 {
   const c = new RunChecker({ symbols: { nameOf: () => '__bswapsi2' } });
   c.observe({ regions: { gpuStatus: 0, gpuControl: Buffer.alloc(1024), vram: Buffer.alloc(1024 * 1024) }, cpu: { pc: 0x80010000, sp: 0x801fff00 }, cap: { exceptions: [{ code: 10, epc: 0x80010980, badVaddr: 0 }], prims: [], chains: [], env: { drawArea: { x0: 0, y0: 0, x1: 319, y1: 239 } } } });
-  ok('check explains an RI exception in a compiler helper', c.findings().some((f) => /reserved instruction.*__bswapsi2.*MIPS32r2/.test(f.msg)));
+  ok('check explains an RI exception in a compiler helper', c.findings().some((f) => /reserved instruction.*__bswapsi2.*MIPS32r2.*libmips1rt/.test(f.msg)));
+  const c2 = new RunChecker({ symbols: { nameOf: () => '__addsf3' } });
+  c2.observe({ regions: { gpuStatus: 0, gpuControl: Buffer.alloc(1024), vram: Buffer.alloc(1024 * 1024) }, cpu: { pc: 0x80010000, sp: 0x801fff00 }, cap: { exceptions: [{ code: 11, epc: 0x80010a54, badVaddr: 0 }], prims: [], chains: [], env: { drawArea: { x0: 0, y0: 0, x1: 319, y1: 239 } } } });
+  ok('check explains FPU use in a float helper', c2.findings().some((f) => /__addsf3.*FPU.*hard float.*libmips1rt/.test(f.msg)), c2.findings().map((f) => f.msg).join(' | '));
 }
 
 // ---- Debugger: disassembler, call stack, profile ----

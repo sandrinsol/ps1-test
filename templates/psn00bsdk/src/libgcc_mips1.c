@@ -7,8 +7,8 @@
  * the program take precedence over libgcc's.
  *
  * Covered: byte swaps, bit counts, 64-bit shifts, multiply, divide and modulo,
- * comparisons. Not covered: floating point (avoid float/double, or use a
- * mipsel-none-elf toolchain built for MIPS I).
+ * comparisons. Not covered: floating point. Only used when libmips1rt.a (built
+ * by .devcontainer/build-mips1-rt.sh, which also has soft-float) isn't installed.
  */
 #include <stdint.h>
 

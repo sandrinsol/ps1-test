@@ -23,11 +23,16 @@ GTE, a sound effect on Cross, and a test that checks it.
   `kind: "sound", wav: "assets/blip.wav", out: "assets/blip.vag"`.
 - `iso.xml` + `system.cnf`: the disc layout for `mkpsxiso`.
 
-With `mipsel-linux-gnu`, the template also compiles `src/libgcc_mips1.c`: that
-toolchain's libgcc is built for MIPS32r2, whose extra instructions crash the PS1's
-MIPS I CPU (a "reserved instruction" exception the moment the game byte-swaps or
-does 64-bit math), so the file provides those helpers in plain C. Floating point
-isn't covered: avoid `float`/`double`, or use a `mipsel-none-elf` toolchain.
+With `mipsel-linux-gnu`, the template links `libmips1rt.a`. That toolchain's
+libgcc is built for MIPS32r2 with hard-float helpers: its extra instructions crash
+the PS1's MIPS I CPU (a "reserved instruction" exception the moment the game
+byte-swaps or does 64-bit math), and its `float`/`double` helpers use an FPU the
+PS1 doesn't have (a "coprocessor unusable" exception). `libmips1rt.a` is LLVM
+compiler-rt's portable C runtime (64-bit integer maths, bit counts, soft-float)
+built for MIPS I by `.devcontainer/build-mips1-rt.sh`, which the install script
+runs; with it, `float` and `double` work (slowly — prefer fixed point in hot
+code). Without it the template compiles `src/libgcc_mips1.c` instead, which covers
+the integer helpers only.
 
 `.devcontainer/install-psn00bsdk.sh` builds PSn00bSDK for Ubuntu's
 `mipsel-linux-gnu` toolchain, with a small fix to its `elf2x` tool
