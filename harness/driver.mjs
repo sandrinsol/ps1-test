@@ -403,14 +403,30 @@ export class EmuHarness {
    *  control[32] }, cycle }. */
   async readCpu() { return this._mem.cpu(await this._rawState()); }
 
+  /** A light per-frame view for checks (instrumented core): { cpu, regions }
+   *  where regions has vram (live), gpuStatus and gpuControl only. */
+  async readLight() {
+    if (!this.live) return { cpu: await this.readCpu(), regions: await this.readRegions() };
+    const b = await this.page.evaluate(() => ({ ...window.Emu.stateBlocks(), vram: window.Emu.liveRead(2, 0, 0x100000) }));
+    const gpu = Buffer.from(b.gpu, 'base64');
+    return {
+      cpu: psxMem.cpuFromRegs(Buffer.from(b.regs, 'base64')),
+      regions: { vram: Buffer.from(b.vram, 'base64'), gpuStatus: gpu.readUInt32LE(4), gpuControl: gpu.subarray(8) },
+    };
+  }
+
   // ---- GPU command capture (instrumented core) ----
   /** Run `frames` frames (default 1) with the core logging every GPU command and
    *  CPU exception, and decode it: { prims, env, exceptions, gp1, chains, stats,
-   *  overflow, frame } (see gpu.mjs decodeLog). Advances time like waitFrames. */
-  async captureFrame(frames = 1) {
+   *  overflow, frame } (see gpu.mjs decodeLog). Advances time like waitFrames.
+   *  `startEx`: the E0-E7 registers at the start (default: read from a state),
+   *  e.g. the previous capture's `ex` when capturing frame after frame. */
+  async captureFrame(frames = 1, { startEx = null } = {}) {
     if (!this.live) throw new Error('GPU capture needs the bundled ps1-test core (this core has no command log)');
-    const r = await this.readRegions();
-    const startEx = Array.from({ length: 8 }, (_, i) => r.gpuControl.readUInt32LE((0xe0 + i) * 4));
+    if (!startEx) {
+      const r = await this.readRegions();
+      startEx = Array.from({ length: 8 }, (_, i) => r.gpuControl.readUInt32LE((0xe0 + i) * 4));
+    }
     await this.page.evaluate(() => window.Emu.logCtl(true));
     try { await this.waitFrames(frames); } finally {
       var log = await this.page.evaluate(() => { const l = window.Emu.logRead(); window.Emu.logCtl(false); return l; });

@@ -35,8 +35,8 @@ try {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name);
   const ALL = ['load_disc', 'wait_frames', 'press', 'set_button', 'set_analog', 'wait_until', 'reset', 'screenshot',
-    'read_memory', 'read_cpu', 'status', 'write_memory', 'state', 'cheats', 'memory_card', 'run_sequence',
-    'record_video', 'assert_golden', 'export_script', 'ab_compare', 'ram_search', 'build'];
+    'read_memory', 'read_cpu', 'gpu_capture', 'view_vram', 'describe', 'status', 'write_memory', 'state', 'cheats',
+    'memory_card', 'run_sequence', 'record_video', 'assert_golden', 'export_script', 'ab_compare', 'ram_search', 'build', 'check'];
   for (const n of ALL) ok(`tool listed: ${n}`, names.includes(n));
   ok('exactly the documented tools', names.length === ALL.length, `${names.length}: ${names.filter((n) => !ALL.includes(n)).join(', ')}`);
   ok('screenshot is annotated read-only', tools.find((t) => t.name === 'screenshot').annotations?.readOnlyHint === true);
@@ -44,7 +44,7 @@ try {
   ok('tool list is slim (no output schemas, $schema or ±2^53 bounds)',
     !tools.some((t) => t.outputSchema) && !listJson.includes('$schema') && !listJson.includes('9007199254740991'));
   ok('tool list stays small', listJson.length / 4 < 3600, `~${Math.round(listJson.length / 4)} tokens`);
-  ok('core set names real tools', CORE_TOOLS.filter((t) => t !== 'describe').every((t) => names.includes(t)));
+  ok('core set names real tools', CORE_TOOLS.every((t) => names.includes(t)));
   const { prompts } = await client.listPrompts();
   ok('prompts listed', ['smoke_test_rom', 'regression_check', 'find_ram_address', 'record_regression_test'].every((p) => prompts.some((x) => x.name === p)));
   const { resources } = await client.listResources();
@@ -183,6 +183,36 @@ try {
   await call('load_disc', { path: EXE });
   r = await call('run_sequence', { steps: [...script.steps, { assertRam: 'box_x', as: 'u16', equals: xBefore }] });
   ok('exported script replays', !r.isError, textOf(r));
+
+  // --- GPU and inspection ---
+  await call('load_disc', { path: EXE });
+  await call('wait_frames', { frames: 20 });
+  r = await call('gpu_capture');
+  ok('gpu_capture lists the frame\'s primitives with symbols', !r.isError && /poly3 20,180 50x50 .*gouraud @[0-9a-f]+ \(ot_packets\+4\)/.test(textOf(r)) && /sprite .* tex 640,0 4bit clut 640,480/.test(textOf(r)), textOf(r));
+  ok('gpu_capture image is the 320x240 draw area at 2x', images(r)[0]?.width === 640 && images(r)[0]?.height === 480);
+  r = await call('gpu_capture', { kinds: ['line'], image: false });
+  ok('gpu_capture kinds filter', !r.isError && /line 10,10/.test(textOf(r)) && !/poly3/.test(textOf(r).split('\n').slice(2).join('\n')) && images(r).length === 0, textOf(r));
+  r = await call('view_vram', { gpu: true });
+  ok('view_vram: 1024x512 with texture pages and CLUTs used', !r.isError && images(r)[0]?.width === 1024 && /Texture pages: 640,0 4bit\. CLUTs: 640,480/.test(textOf(r)), textOf(r));
+  r = await call('view_vram', { what: 'texture', x: 640, y: 0, clutX: 640, clutY: 480, w: 16, h: 16 });
+  ok('view_vram texture decodes through the CLUT', !r.isError && images(r)[0]?.width === 32, textOf(r));
+  r = await call('describe', { watch: ['box_x:u16', 'frame_count:u32'], gpu: true });
+  ok('describe: pc in main, watch, display mode, gpu summary', /pc 0x[0-9a-f]+ \(main\+\d+\)/.test(textOf(r)) && /watch: box_x=\d+ frame_count=\d+/.test(textOf(r)) && /320x240 15-bit NTSC/.test(textOf(r)) && /gpu \(next frame\): 2 fill, 1 poly3, 1 sprite, 1 line/.test(textOf(r)), textOf(r));
+  r = await call('wait_frames', { frames: 1 });
+  ok('watched values follow every step', /watch: box_x=\d+ frame_count=\d+/.test(textOf(r)));
+  await call('describe', { watch: [] });
+  const fBefore = (await call('status')).structuredContent.frame;
+  r = await call('check', { frames: 40 });
+  ok('check: a healthy run has no errors', !r.isError && r.structuredContent.errors === 0 && /no lag frames in 40/.test(textOf(r)) && /no CPU exceptions/.test(textOf(r)), textOf(r));
+  ok('check restores the state (and the clock)', (await call('status')).structuredContent.frame === fBefore, `${fBefore} → ${(await call('status')).structuredContent.frame}`);
+  await call('set_button', { buttons: ['L2', 'R2', 'SELECT'], pressed: true });
+  r = await call('check', { frames: 40 });
+  ok('check: the crash is reported with its symbol and address', r.structuredContent.errors >= 1 && /AdEL.*main\+\d+.*address 0x80010002/.test(textOf(r)) && /hung in the BIOS/.test(textOf(r)), textOf(r));
+  await call('set_button', { buttons: ['L2', 'R2', 'SELECT'], pressed: false });
+  r = await call('memory_card', { action: 'format', slot: 2, reset: false });
+  ok('memory_card format', !r.isError, textOf(r));
+  r = await call('memory_card', { action: 'list', slot: 2 });
+  ok('memory_card list on a blank card', !r.isError && /0 save\(s\), 15 free/.test(textOf(r)), textOf(r));
 
   // --- Analog via MCP ---
   r = await call('load_disc', { path: EXE, pad1: 'analog' });

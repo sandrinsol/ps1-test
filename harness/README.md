@@ -58,11 +58,14 @@ VS Code uses the key `"servers"` instead of `"mcpServers"`.
 | `screenshot` | Current frame as an image (2× by default). |
 | `read_memory` | Read RAM, the scratchpad, I/O ports or the BIOS; addresses as numbers, hex strings (`"0x80010000"`) or symbols. |
 | `read_cpu` | R3000A registers, COP0 status/cause, GTE registers; names the function the PC is in. |
+| `gpu_capture` | Run a frame logging every GPU command: the primitives drawn (polygons, sprites, lines, fills, VRAM transfers) with their box, colour, texture page and CLUT, and for DMA-chain packets the RAM address and symbol; plus the drawn buffer with each one outlined. |
+| `view_vram` | The whole 1024×512 VRAM with the display and draw areas (and, with `gpu: true`, the texture pages and CLUTs in use) outlined, or one texture decoded through its CLUT. |
+| `describe` | The machine as text, far cheaper than a screenshot: where the CPU is, watched variables, display mode, how much of the screen changed; `gpu: true` adds what the next frame draws. `watch` sets the variables every step reports. |
 | `status` | Disc/EXE, BIOS, region, frame, held buttons, saved states, cheats. |
 | `write_memory` | Write memory on the current frame. |
 | `state` | Save or load named snapshots, optionally to/from a file. |
 | `cheats` | GameShark / Action Replay codes (`"80010394 0064"`). |
-| `memory_card` | Export or import a memory card (`.mcr`/`.mcd`, `.gme`, `.vgs`) in slot 1 or 2. |
+| `memory_card` | List the saves on a card (game ID, title, blocks, icon), export or import a card (`.mcr`/`.mcd`, `.gme`, `.vgs`), or insert a blank formatted one, in slot 1 or 2. |
 | `run_sequence` | Run a list of steps in one call (see [Steps](#steps)). |
 | `assert_golden` | Compare the frame to a golden PNG; on failure returns current, golden and diff images. |
 | `record_video` | Play N frames into `.gif`, animated `.png`, `.webm`, `.mp4` (with sound) or `.wav`. |
@@ -70,6 +73,7 @@ VS Code uses the key `"servers"` instead of `"mcpServers"`.
 | `ab_compare` | Run the same steps on two discs/EXEs and report differences. |
 | `ram_search` | Find where a value (HP, score…) is stored: `start`, then `filter` until one address is left. |
 | `build` | Run the project's build (CMake, make, or `ps1test.json`), report compiler errors as `file:line: error: …`, load the new disc/EXE with its symbols. |
+| `check` | Hardware rules: the PS-EXE header and `SYSTEM.CNF` (region marker, load address, entry, size), then a short run watching for CPU exceptions (unaligned or bad addresses, bus errors, …, with the faulting function), hangs, lag frames (`frameCounter`), CPU load (`cpu_usage`), a blank or frozen screen, polygons the GPU drops (> 1023×511), primitives outside the drawing area, textures and CLUTs inside the framebuffer, all-zero CLUTs, DMA from outside RAM, unaligned DMA chains, and the stack reaching the program's data. |
 
 Prompts: `smoke_test_rom`, `regression_check`, `find_ram_address`,
 `record_regression_test`. Resources: `emu://screen`, `emu://status`.
@@ -106,9 +110,15 @@ name, `"player_x"` or `"player_x+2"`, and `read_cpu` names the function the CPU 
   "region": "ntsc",
   "pad1": "dualshock",
   "watch": ["player_x:s16", "lives"],
-  "frameCounter": "frame_count"
+  "frameCounter": "frame_count",
+  "cpuUsage": "cpu_usage"
 }
 ```
+
+`frameCounter` is a variable the game's main loop increments once per frame;
+`check` counts the frames where it didn't (lag). `cpuUsage` is a variable holding
+the percentage of the last frame the game spent working; `check` reports its range.
+Both are found by name (`frame_count`, `cpu_usage`) when there's a symbol file.
 
 ## Steps
 
@@ -127,7 +137,7 @@ Each step has one action key:
 | memory | `{"read": "0x80010000", "as": "u16"}`, `{"write": "player_hp", "value": 1}`, `{"assertRam": "lives", "equals": 3}` (or `min`/`max`) |
 | golden image | `{"assert": "goldens/title.png", "threshold": 0.02, "ignore": [{"x": 200, "y": 0, "w": 40, "h": 16}]}` |
 | video | `{"video": {"frames": 120, "path": "clips/walk.gif"}}` |
-| other | `{"reset": true}`, `{"cheats": ["..."]}`, `{"importCard": "cards/100pct.mcr", "slot": 1}` |
+| other | `{"reset": true}`, `{"cheats": ["..."]}`, `{"importCard": "cards/100pct.mcr", "slot": 1}`, `{"formatCard": 2}` |
 
 From the command line:
 
@@ -168,9 +178,12 @@ await emu.close();
 | `readCpu()`, `setCheats(codes)`, `restart()` | CPU + GTE registers, cheats, reset. |
 | `readMemoryCard(slot)`, `writeMemoryCard(buf, {slot, reset})` | Memory cards. |
 | `record(n, {every})`, `startRecording()`, `stopRecording()` | Frame-exact captures `[{frame, png}]` with `.audio` (PCM); save with `saveVideo()` from `recording.mjs`. |
+| `captureFrame(n)` | Run n frames logging the GPU and CPU exceptions → `{ prims, env, exceptions, chains, stats }` (`gpu.mjs`). |
 | `symbols`, `useSymbols(file)`, `addr(nameOrAddress)`, `options`, `close()` | |
 
-`disc.mjs` also builds bootable discs: `makeDisc({ exe, out, files })` wraps a
+GPU decoding and VRAM images (`gpu.mjs`), memory cards (`mcard.mjs`), the
+hardware rules (`checks.mjs`) and disc reading (`disc.mjs`: `isoFile`, `systemCnf`)
+can also be used on their own. `disc.mjs` also builds bootable discs: `makeDisc({ exe, out, files })` wraps a
 PS-EXE (and data files) into an ISO 9660 Mode 2 `.bin`/`.cue` with `SYSTEM.CNF`,
 and `exe.mjs` turns an `.elf` into a PS-EXE.
 

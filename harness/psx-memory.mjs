@@ -175,6 +175,14 @@ const GPR = ['zero', 'at', 'v0', 'v1', 'a0', 'a1', 'a2', 'a3', 't0', 't1', 't2',
   's0', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 't8', 't9', 'k0', 'k1', 'gp', 'sp', 'fp', 'ra'];
 const EXC = ['Int', 'Mod', 'TLBL', 'TLBS', 'AdEL', 'AdES', 'IBE', 'DBE', 'Syscall', 'Bp', 'RI', 'CpU', 'Ov'];
 
+/** cpu() from just the register block (as page.html stateBlocks cuts it out). */
+export function cpuFromRegs(regs) {
+  const fake = Buffer.alloc(OFF.regs + regs.length);
+  regs.copy(fake, OFF.regs);
+  fake.write('STv4', 0, 'latin1');
+  return cpu(fake);
+}
+
 /** R3000A registers, COP0 status and the GTE's registers from the state.
  *  @returns {Record<string, any> & { pc: number, sp: number, ra: number, hi: number, lo: number }} */
 export function cpu(state) {

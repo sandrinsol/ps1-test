@@ -5,11 +5,11 @@
 // as tools an AI agent can call to test the PS1 games and homebrew it builds — no
 // third-party emulator program. Tools, in groups:
 //   play     load_disc, wait_frames, press, set_button, set_analog, wait_until, reset
-//   look     screenshot, read_memory, read_cpu, status
+//   look     screenshot, read_memory, read_cpu, gpu_capture, view_vram, describe, status
 //   change   write_memory, state (save/load), memory_card, cheats
 //   test     run_sequence, assert_golden, export_script, ab_compare, record_video
 //   find     ram_search
-//   develop  build (compile + reload)
+//   develop  build (compile + reload), check (hardware rules)
 // Addresses can be symbol names when there is a symbol file (.elf/.map/.sym).
 // A ps1test.json in the workspace sets project defaults (build, rom, bios, watch).
 // The machine is paused between calls, so every read lands on an exact frame.
@@ -36,7 +36,11 @@ import { saveVideo } from './recording.mjs';
 import { RamSearch, SEARCH_OPS, SEARCH_TYPES } from './ramsearch.mjs';
 import { runSteps, decodeValues, encodeValue, VALUE_TYPES } from './steps.mjs';
 import { runCommand, parseDiagnostics, formatDiagnostic, detectBuild, findRom, readProjectConfig } from './build.mjs';
-import { discFiles } from './disc.mjs';
+import { discFiles, dataTrack } from './disc.mjs';
+import { primLine, captureImage, vramPng, texturePng, stateDrawEnv } from './gpu.mjs';
+import { display } from './psx-memory.mjs';
+import { listSaves, formatCard } from './mcard.mjs';
+import { exeIssues, discIssues, RunChecker } from './checks.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(__dirname, 'out');
@@ -386,6 +390,62 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
     return result(`Frame ${await emu.frameNum()}: ${lines.join('\n')}${at ? `\nin ${at}` : ''}${ra ? `, returns to ${ra}` : ''}`, { pc: c.pc });
   });
 
+  tool('gpu_capture', {
+    description: 'Run `frames` frame(s) (default 1) logging every GPU command: list the primitives drawn (kind, box, colour, texture page/CLUT, RAM address + symbol of DMA-chain packets) and show the drawn buffer with each outlined. Also reports CPU exceptions in those frames.',
+    inputSchema: {
+      frames: z.number().int().min(1).max(60).default(1),
+      list: z.number().int().min(0).max(500).default(40).describe('primitives to list'),
+      kinds: z.array(z.enum(['poly3', 'poly4', 'line', 'polyline', 'rect', 'sprite', 'dot', 'fill', 'copy', 'upload', 'download'])).optional(),
+      only: z.array(z.number().int().min(0)).optional().describe('outline only these primitive numbers'),
+      image: z.boolean().default(true),
+      scale: Scale,
+    },
+  }, async ({ frames, list, kinds, only, image, scale }) => {
+    const cap = await emu.captureFrame(frames);
+    record({ wait: frames });
+    const name = (a) => emu.symbols?.nameOf(a, { maxOffset: 0x10000 }) ?? null;
+    const shown = cap.prims.filter((p) => !kinds || kinds.includes(p.kind));
+    const stats = Object.entries(cap.stats).map(([k, v]) => `${v} ${k}`).join(', ') || 'nothing';
+    const env = cap.env;
+    const lines = [
+      `Frame ${cap.frame}: ${stats}${frames > 1 ? ` over ${frames} frames` : ''}; ${cap.chains.length} DMA chain(s)${cap.overflow ? '; LOG OVERFLOWED (partial)' : ''}.`,
+      `draw area ${env.drawArea.x0},${env.drawArea.y0}-${env.drawArea.x1},${env.drawArea.y1} offset ${env.offset.join(',')}; coordinates below are VRAM (offset applied).`,
+      ...cap.exceptions.map((e) => `EXCEPTION code ${e.code} at ${hex(e.epc)}${name(e.epc) ? ` (${name(e.epc)})` : ''} address ${hex(e.badVaddr)}`),
+      ...shown.slice(0, list).map((p) => primLine(p, name)),
+      ...(shown.length > list ? [`…${shown.length - list} more`] : []),
+    ];
+    const extra = image ? [png(captureImage(await emu.readRegions(), cap, { scale, only: only ?? null }))] : [];
+    return result(lines.join('\n') + await watchLine(), { frame: cap.frame, prims: cap.prims.length, exceptions: cap.exceptions.length }, extra);
+  });
+
+  tool('view_vram', {
+    description: 'VRAM (1024x512, 15-bit view) with the display area (white) and draw area (red) outlined; gpu:true runs a frame and also outlines the texture pages (cyan) and CLUTs (orange) it used. texture: one texture page decoded through a CLUT, as the GPU samples it.',
+    inputSchema: {
+      what: z.enum(['vram', 'texture']).default('vram'),
+      gpu: z.boolean().default(false),
+      x: z.number().int().min(0).max(1023).optional(), y: z.number().int().min(0).max(511).optional(),
+      depth: z.enum(['4bit', '8bit', '15bit']).default('4bit'),
+      clutX: z.number().int().min(0).max(1023).optional(), clutY: z.number().int().min(0).max(511).optional(),
+      w: z.number().int().min(1).max(256).default(256), h: z.number().int().min(1).max(256).default(256),
+      scale: z.number().int().min(1).max(4).default(1),
+    },
+    annotations: RO,
+  }, async (a) => {
+    let cap = null;
+    if (a.gpu) { cap = await emu.captureFrame(1); record({ wait: 1 }); }
+    const r = await emu.readRegions();
+    const d = display(r), env = cap?.env ?? stateDrawEnv(r);
+    const info = `display ${d.x},${d.y} ${d.w}x${d.h}${d.depth24 ? ' 24-bit' : ''}${d.interlaced ? ' interlaced' : ''}${d.enabled ? '' : ' (off)'}; draw area ${env.drawArea.x0},${env.drawArea.y0}-${env.drawArea.x1},${env.drawArea.y1}`;
+    if (a.what === 'texture') {
+      if (a.x === undefined || a.y === undefined) return errText('texture needs `x` and `y` (the page or texture origin in VRAM)');
+      const clut = a.depth === '15bit' || a.clutX === undefined ? null : { x: a.clutX, y: a.clutY ?? 0 };
+      return result(`Texture ${a.x},${a.y} ${a.depth}${clut ? ` CLUT ${clut.x},${clut.y}` : a.depth !== '15bit' ? ' (no CLUT: grey levels)' : ''} ${a.w}x${a.h}, frame ${await emu.frameNum()}. ${info}.`, undefined,
+        [png(texturePng(r, { x: a.x, y: a.y, depth: a.depth, clut, w: a.w, h: a.h, scale: Math.max(a.scale, 2) }))]);
+    }
+    const used = cap ? ` Texture pages: ${[...new Set(cap.prims.filter((p) => p.texpage).map((p) => `${p.texpage.x},${p.texpage.y} ${p.texpage.depth}`))].join('; ') || 'none'}. CLUTs: ${[...new Set(cap.prims.filter((p) => p.clut).map((p) => `${p.clut.x},${p.clut.y}`))].join('; ') || 'none'}.` : '';
+    return result(`VRAM, frame ${await emu.frameNum()}: ${info}.${used}`, undefined, [png(vramPng(r, { cap, scale: a.scale }))]);
+  });
+
   // ---- Change ----
   tool('write_memory', {
     description: 'Write RAM on the current frame (value+as, or hex bytes). Says if it did not stick.',
@@ -452,12 +512,27 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   });
 
   tool('memory_card', {
-    description: 'export / import a memory card image (.mcr/.mcd raw 128 KB, .gme, .vgs) at `path` for slot 1 or 2; import resets unless reset:false.',
+    description: 'Memory card in slot 1/2. list: the saves (game ID, title, blocks, icon). export / import: a card image (.mcr/.mcd raw 128 KB, .gme, .vgs) at `path`; import resets unless reset:false. format: insert a blank formatted card.',
     inputSchema: {
-      action: z.enum(['export', 'import']),
-      path: z.string(), slot: z.number().int().min(1).max(2).default(1), reset: z.boolean().default(true),
+      action: z.enum(['list', 'export', 'import', 'format']),
+      path: z.string().optional(), slot: z.number().int().min(1).max(2).default(1), reset: z.boolean().default(true),
+      icons: z.boolean().default(true),
     },
-  }, async ({ action, path: p, slot, reset }) => {
+  }, async ({ action, path: p, slot, reset, icons }) => {
+    if (action === 'list') {
+      const data = await emu.readMemoryCard(slot);
+      if (!data) return result(`Slot ${slot}: no card data yet (nothing written or inserted).`, { saves: 0 });
+      const l = listSaves(data);
+      const lines = l.saves.map((s) => `block ${s.block}: ${s.file} "${s.title}" ${s.blocks} block(s)${s.region ? ` ${s.region}` : ''}`);
+      const imgs = icons ? l.saves.filter((s) => s.icon).flatMap((s) => [{ type: 'text', text: `${s.file}:` }, png(s.icon)]) : [];
+      return result(`Slot ${slot}: ${l.saves.length} save(s), ${l.freeBlocks} free block(s).${l.problems.length ? `\nPROBLEMS: ${l.problems.join('; ')}` : ''}${lines.length ? `\n${lines.join('\n')}` : ''}`, { saves: l.saves.length, free: l.freeBlocks }, imgs);
+    }
+    if (action === 'format') {
+      await emu.writeMemoryCard(formatCard(), { slot, reset });
+      record({ formatCard: slot, reset });
+      return result(`Slot ${slot}: blank formatted card inserted${reset ? '; reset' : ''}. Frame ${await emu.frameNum()}.`);
+    }
+    if (!p) return errText(`${action} needs \`path\``);
     if (action === 'export') {
       const data = await emu.readMemoryCard(slot);
       if (!data) return errText(`Slot ${slot} has no memory card data yet (the game hasn't written one).`);
@@ -721,6 +796,87 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
     }
     return result(`${text}\nFrame ${await emu.frameNum()}.${await watchLine()}`, { built: true, frame: await emu.frameNum() });
   }, { needsRom: false });
+
+  tool('describe', {
+    description: 'The machine as text, far cheaper than a screenshot: frame, where the CPU is, watched values, display mode, % of the screen changed since the last describe; gpu:true runs one frame and summarises what was drawn. watch sets the variables reported after every step that advances time ("name", "name:s16", "0x80010000:u32"; [] clears).',
+    inputSchema: {
+      watch: z.array(z.string()).optional(),
+      gpu: z.boolean().default(false),
+      image: z.boolean().default(false),
+      scale: Scale,
+    },
+    annotations: RO,
+  }, async (a) => {
+    if (a.watch) watches = a.watch.map(parseWatch);
+    const lines = [];
+    let cap = null;
+    if (a.gpu) { cap = await emu.captureFrame(1); record({ wait: 1 }); }
+    const r = await emu.readRegions();
+    const cpu = await emu.readCpu();
+    const at = emu.symbols?.nameOf(cpu.pc);
+    lines.push(`Frame ${await emu.frameNum()}, pc ${hex(cpu.pc)}${at ? ` (${at})` : cpu.pc >>> 0 >= 0xbfc00000 ? ' (BIOS)' : ''}${cpu.cop0.exception !== 'Int' && cpu.cop0.exception !== 'Syscall' && (cpu.cop0.cause & 0x7c) ? `, last exception ${cpu.cop0.exception}` : ''}.`);
+    const wv = await watchValues();
+    if (wv.length) lines.push(`watch: ${wv.join(' ')}`);
+    const d = display(r), env = stateDrawEnv(r);
+    lines.push(`display: ${d.enabled ? `${d.w}x${d.h}${d.interlaced ? 'i' : ''} ${d.depth24 ? '24' : '15'}-bit ${d.pal ? 'PAL' : 'NTSC'} from VRAM ${d.x},${d.y}` : 'OFF'}; drawing into ${env.drawArea.x0},${env.drawArea.y0}-${env.drawArea.x1},${env.drawArea.y1}`);
+    if (cap) {
+      const stats = Object.entries(cap.stats).map(([k, v]) => `${v} ${k}`).join(', ') || 'nothing';
+      lines.push(`gpu (next frame): ${stats}; ${cap.chains.length} DMA chain(s)${cap.exceptions.length ? `; ${cap.exceptions.length} CPU exception(s)` : ''}`);
+    }
+    const shot = await emu.screenshot();
+    if (lastDescribe) {
+      const c = compare(lastDescribe, shot, { tolerance: 0 });
+      lines.push(`screen: ${c.fraction === 0 ? 'unchanged' : `${(c.fraction * 100).toFixed(1)}% changed`} since the last describe`);
+    }
+    lastDescribe = shot;
+    return result(lines.join('\n'), undefined, a.image ? [png(scalePng(shot, a.scale))] : []);
+  });
+
+  tool('check', {
+    description: 'Hardware rules: PS-EXE header / SYSTEM.CNF, then `frames` frames watching for CPU exceptions, hangs, lag (frame counter), CPU load (cpu_usage variable), a blank or frozen screen, GPU commands the console drops or that texture from the framebuffer, empty CLUTs, DMA from outside RAM, and the stack reaching the data. State restored after.',
+    inputSchema: {
+      frames: z.number().int().min(1).max(3600).default(120),
+      frameCounter: Address.optional().describe('per-frame counter (default ps1test.json or *frame_count*)'),
+    },
+  }, async ({ frames, frameCounter }) => {
+    const found = [];
+    const region = emu.options.region === 'auto' ? null : emu.options.region;
+    if (emu.options.exe) found.push(...exeIssues(await readFile(romPath), { region }));
+    else if (/\.(cue|bin|iso|img)$/i.test(romPath)) found.push(...discIssues(await dataTrack(romPath), { region }));
+    const findSym = (re) => [...(emu.symbols?.byName.values() ?? [])].find((x) => re.test(x.name))?.name;
+    let counter = frameCounter ?? cfg.frameCounter ?? findSym(/^_?(g_|s_)?frame_?(count|counter|cnt|num)s?$/i) ?? null;
+    let counterAddr = null, width = 4, counterNote = '';
+    if (counter !== null) {
+      try {
+        counterAddr = emu.addr(counter);
+        const sym = typeof counter === 'string' ? emu.symbols?.get(counter) : null;
+        if (sym?.size) width = Math.min(sym.size, 4) === 3 ? 2 : Math.min(sym.size, 4);
+      } catch (e) { counterNote = ` (frame counter: ${e.message})`; }
+    }
+    const cpuName = cfg.cpuUsage ?? findSym(/^_?(cpu_usage|cpu_load|cpuUsage)$/);
+    let cpuAddr = null, cpuWidth = 1;
+    if (cpuName) { try { cpuAddr = emu.addr(cpuName); cpuWidth = Math.min(emu.symbols?.get(cpuName)?.size ?? 1, 4); } catch { cpuAddr = null; } }
+    const endName = ['_end', 'end', '__heap_start', '_heap_start', '__bss_end', '__bss_end__', '_bss_end'].find((n) => emu.symbols?.get(n));
+    const checker = new RunChecker({ frameCounter: counterAddr, cpuUsage: cpuAddr, symbols: emu.symbols, dataEnd: endName ? emu.symbols.get(endName).addr : null });
+    const saved = await emu.saveState(), f0 = await emu.frameNum();
+    const rd = async (a, w) => { const b = await emu.readMemory(a, w); return w === 1 ? b.readInt8(0) : w === 2 ? b.readUInt16LE(0) : b.readUInt32LE(0); };
+    try {
+      let ex = null;
+      for (let i = 0; i < frames; i++) {
+        const cap = emu.live ? await emu.captureFrame(1, { startEx: ex }) : (await emu.waitFrames(1), null);
+        ex = cap?.ex ?? null;
+        const { cpu, regions } = await emu.readLight();
+        checker.observe({ regions, cpu, cap,
+          counter: counterAddr !== null ? await rd(counterAddr, width) : null,
+          cpuPct: cpuAddr !== null ? await rd(cpuAddr, cpuWidth) : null });
+      }
+    } finally { await emu.loadState(saved, { frame: f0 }); }
+    found.push(...checker.findings());
+    if (!emu.live) found.push({ level: 'info', msg: 'GPU and exception checks need the bundled ps1-test core (this core has no command log)' });
+    const errs = found.filter((f) => f.level === 'error').length, warns = found.filter((f) => f.level === 'warn').length;
+    const head = `${errs ? `${errs} error(s)` : 'No errors'}, ${warns} warning(s) over ${frames} frames${counterAddr === null ? counterNote || ' (no frame counter: lag not checked)' : ` (frame counter ${label(counterAddr)})`}; state restored.`;
+    return result([head, ...found.map((f) => `${f.level === 'ok' || f.level === 'info' ? f.level : f.level.toUpperCase()}: ${f.msg}`)].join('\n'), { errors: errs, warnings: warns });
+  });
 
   // ---- Status ----
   const statusData = async () => (emu
