@@ -69,6 +69,12 @@
         this.writeFile('/home/web_user/retroarch/userdata/config/remaps/PCSX-ReARMed/PCSX-ReARMed.rmp', remap);
         return write.apply(this, a);
       };
+      // No audio sync: RetroArch skips core frames while the WebAudio buffer is
+      // full, so a page whose audio output isn't drained (seen on Windows runners
+      // with several emulator pages open) stops advancing. The clock is driven by
+      // animation frames, and audio is captured from the core directly.
+      const cfg = GM.prototype.getRetroArchCfg;
+      GM.prototype.getRetroArchCfg = function (...a) { return cfg.apply(this, a) + 'audio_sync = false\n'; };
     };
     Object.defineProperty(window, 'EJS_emulator', {
       configurable: true,
@@ -322,12 +328,22 @@
         if (performance.now() - t0 > timeoutMs) {
           setFF(false);
           Emu.pause();
-          throw new Error(`waitFrames timeout: frame ${f} < target ${targetFrame}`);
+          throw new Error(`waitFrames timeout: frame ${f} < target ${targetFrame} (${Emu.stallInfo()})`);
         }
         await raf();
         recTick();
       }
     }
+
+    // What the page looked like when the clock stopped advancing (for diagnosing
+    // a stalled emulator: focus, visibility, audio, EmulatorJS's own pause state).
+    Emu.stallInfo = () => {
+      let audio = '?';
+      try { audio = gm().Module.AL?.currentCtx?.audioCtx?.state ?? 'none'; } catch {}
+      const e = window.EJS_emulator;
+      return [`core frame ${gm().getFrameNum()}`, `focus ${document.hasFocus()}`, `visibility ${document.visibilityState}`,
+        `audio ${audio}`, `ejs paused ${e?.paused}`, `running ${Emu._running}`, `ff ${ffOn}`].join(', ');
+    };
 
     // Deterministic clock: targets accumulate on ONE absolute timeline anchored at
     // boot (frame 0), so identical scripts stop on identical emulated frames across
