@@ -28,7 +28,8 @@
     "run-script": "node runner.mjs",
     "test": "node tests/run-all.mjs",
     "fixtures": "node tests/fixtures/build.mjs",
-    "package-test": "node tests/package.mjs"
+    "package-test": "node tests/package.mjs",
+    "site-test": "node tests/site.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

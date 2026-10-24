@@ -310,10 +310,11 @@ try {
   ok('writes outside the workspace are refused', r.isError && /refusing to write/.test(textOf(r)));
 
   // --- Build (a shell command) ---
-  r = await call('build', { command: 'echo "src/main.c:3:1: error: expected \';\'" && exit 1' });
+  // (commands that work in both sh and cmd.exe)
+  r = await call('build', { command: 'echo src/main.c:3:1: error: expected semicolon && exit 1' });
   ok('build failure reports file:line errors', r.isError && /src\/main\.c:3:1: error: expected/.test(textOf(r)), textOf(r));
-  r = await call('build', { command: 'true', rom: EXE });
-  ok('build success reloads with the last options', !r.isError && /Loaded harness\/tests\/fixtures\/hello\.exe \(HLE BIOS/.test(textOf(r)), textOf(r));
+  r = await call('build', { command: 'node --version', rom: EXE });
+  ok('build success reloads with the last options', !r.isError && /Loaded harness[\\/]tests[\\/]fixtures[\\/]hello\.exe \(HLE BIOS/.test(textOf(r)), textOf(r));
 } finally {
   await close();
 }
