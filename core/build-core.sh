@@ -32,6 +32,14 @@ if [ ! -d emsdk ]; then
 fi
 # shellcheck disable=SC1091
 source emsdk/emsdk_env.sh >/dev/null
+# Reproducible: the same sources give the same bytes wherever they're built.
+# Compiled-in paths (__FILE__ in asserts, Emscripten's headers) are made
+# relative to the work directory, and nothing takes the time of day.
+# (Clang applies the most specific map, so an emsdk inside the work directory
+# still maps to /emsdk/.)
+EMSDK_REAL="$(cd "$EMSDK" && pwd -P)"
+export EMCC_CFLAGS="-ffile-prefix-map=$PWD/=/build/ -ffile-prefix-map=$EMSDK/=/emsdk/ -ffile-prefix-map=$EMSDK_REAL/=/emsdk/"
+export SOURCE_DATE_EPOCH=0 TZ=UTC LC_ALL=C
 
 # The zlib port, fetched with git (some networks block GitHub archive downloads).
 ZPORT="$(em-config CACHE)/ports/zlib"
