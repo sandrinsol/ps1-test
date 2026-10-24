@@ -18,7 +18,12 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # Windows: Linux and macOS hosted runners stopped starting for this account
+    # (jobs fail at once with no runner); the steps are bash, which Windows has.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
