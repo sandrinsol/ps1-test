@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#16161e" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="web/icon-192.png" />
+  <link rel="apple-touch-icon" href="web/icon-192.png" />
   <title>PS1 Emulator</title>
   <style>
     :root { color-scheme: dark; }
@@ -15,7 +19,7 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 20px;
+      gap: 16px;
       padding: 16px;
       background: #16161e;
       color: #e6e6ee;
@@ -30,7 +34,11 @@
       padding: 32px 16px;
       max-width: 560px;
       text-align: center;
+      border: 2px dashed transparent;
+      border-radius: 14px;
+      transition: border-color .15s, background .15s;
     }
+    body.dragging #picker, body.dragging #box { border-color: #6d63ff; background: #1d1d2b; }
     label.btn {
       background: #5a4fff;
       color: #fff;
@@ -42,20 +50,31 @@
     }
     label.btn:hover { background: #6d63ff; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
-    button.btn { font: inherit; border: 1px solid #5a4fff; background: transparent; color: #e6e6ee; padding: 12px 22px; border-radius: 10px; cursor: pointer; font-weight: 600; }
+    button.btn { font: inherit; border: 1px solid #5a4fff; background: transparent; color: #e6e6ee; padding: 10px 18px; border-radius: 10px; cursor: pointer; font-weight: 600; }
     button.btn:hover { background: #24243a; }
+    button.small { padding: 6px 12px; font-size: 14px; }
     small { color: #8a8a9a; line-height: 1.5; }
     fieldset { border: 1px solid #33334a; border-radius: 10px; padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 10px 16px; justify-content: center; }
     legend { color: #8a8a9a; font-size: 13px; padding: 0 6px; }
     fieldset label { font-size: 14px; cursor: pointer; }
-    #biosFileRow[hidden] { display: none; }
     #error { color: #ff7a7a; }
     #box {
       width: 100%;
       max-width: 800px;
       aspect-ratio: 4 / 3;
+      border: 2px dashed transparent;
+      border-radius: 6px;
     }
     #game { width: 100%; height: 100%; }
+    #toolbar { width: 100%; max-width: 800px; justify-content: flex-end; }
+    #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #2b2b40; padding: 10px 16px; border-radius: 10px; font-size: 14px; }
+    dialog { background: #1e1e2b; color: #e6e6ee; border: 1px solid #33334a; border-radius: 14px; width: min(92vw, 480px); padding: 18px; }
+    dialog::backdrop { background: rgba(0, 0, 0, .6); }
+    dialog h2 { margin: 0 0 10px; font-size: 17px; }
+    #saves { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow: auto; }
+    #saves li { display: flex; align-items: center; gap: 10px; background: #26263a; padding: 6px 10px; border-radius: 8px; font-size: 14px; }
+    #saves canvas { width: 32px; height: 32px; image-rendering: pixelated; flex: none; }
+    #saves .meta { color: #8a8a9a; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -67,12 +86,12 @@
         Load disc or EXE
         <input id="rom" type="file" accept=".cue,.bin,.iso,.img,.exe,.psx,.pbp,.zip,.7z" multiple hidden />
       </label>
-      <button id="demo" class="btn ghost" type="button">Try the demo</button>
+      <button id="demo" class="btn" type="button">Try the demo</button>
     </div>
     <small>
-      Pick a disc image (<code>.cue</code> together with its <code>.bin</code> files, or a
+      Pick or drop a disc image (<code>.cue</code> together with its <code>.bin</code> files, or a
       single <code>.bin</code>/<code>.iso</code>), a homebrew <code>.exe</code>, or a
-      <code>.zip</code>. Runs 100% offline.
+      <code>.zip</code>. Runs 100% offline — install it as an app from the browser's menu.
     </small>
     <fieldset>
       <legend>BIOS</legend>
@@ -86,15 +105,36 @@
     <small id="error"></small>
   </div>
 
+  <div id="toolbar" class="row" hidden>
+    <button id="cardBtn" class="btn small" type="button">Memory card</button>
+    <button id="otherBtn" class="btn small" type="button">Another game</button>
+  </div>
   <div id="box" hidden>
     <div id="game"></div>
   </div>
 
-  <script>
+  <dialog id="cardDlg">
+    <h2>Memory card (slot 1)</h2>
+    <ul id="saves"></ul>
+    <small id="cardInfo"></small>
+    <div class="row" style="justify-content: flex-end; margin-top: 12px">
+      <button id="cardExport" class="btn small" type="button">Export</button>
+      <label class="btn small" style="padding: 6px 12px; font-size: 14px">Import<input id="cardFile" type="file" accept=".mcr,.mcd,.gme,.vgs,.mem,.srm" hidden /></label>
+      <button id="cardFormat" class="btn small" type="button">Format</button>
+      <button id="cardClose" class="btn small" type="button">Close</button>
+    </div>
+  </dialog>
+  <div id="toast" hidden></div>
+
+  <script type="module">
+    import { rawCard, formatCard, listSaves } from './web/memcard.js';
     const $ = (id) => document.getElementById(id);
     for (const r of document.querySelectorAll('input[name=bios]')) {
       r.addEventListener('change', () => { $('biosFileRow').hidden = r.value !== 'file' || !r.checked; });
     }
+    const toast = (msg) => { $('toast').textContent = msg; $('toast').hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => { $('toast').hidden = true; }, 3500); };
+    const ext = (f) => f.name.split('.').pop().toLowerCase();
+    const CARD_EXT = ['mcr', 'mcd', 'gme', 'vgs', 'mem', 'srm'];
 
     // A .cue names its track files, and EmulatorJS loads one file: put a .cue and
     // its tracks into an uncompressed zip, which EmulatorJS unpacks.
@@ -121,31 +161,51 @@
       return new Blob([...parts, ...central, end]);
     }
 
-    $('rom').addEventListener('change', async (e) => {
-      const files = [...e.target.files];
+    /** Files picked or dropped → the game to start (a .cue and its tracks zipped together). */
+    async function openFiles(files) {
+      $('error').textContent = '';
       if (!files.length) return;
-      const ext = (f) => f.name.split('.').pop().toLowerCase();
       const cue = files.find((f) => ext(f) === 'cue');
-      let game = files[0];
+      let game = files.find((f) => !CARD_EXT.includes(ext(f))) ?? null;
+      if (!game) { $('error').textContent = 'That is a memory card: start a game first, then drop it on the game.'; return; }
       if (cue) {
         const names = [...(await cue.text()).matchAll(/^\s*FILE\s+(?:"([^"]+)"|(\S+))/gim)].map((m) => (m[1] ?? m[2]).split(/[\\/]/).pop());
         const missing = names.filter((n) => !files.some((f) => f.name === n));
-        if (missing.length) { $('error').textContent = `${cue.name} needs ${missing.join(', ')} too: select the .cue and its track files together.`; return; }
+        if (missing.length) { $('error').textContent = `${cue.name} needs ${missing.join(', ')} too: select (or drop) the .cue and its track files together.`; return; }
         game = new File([await zipStore([cue, ...files.filter((f) => names.includes(f.name))])], cue.name.replace(/\.cue$/i, '.zip'));
       }
       start(game, game.name.replace(/\.[^.]+$/, ''));
-    });
+    }
+    $('rom').addEventListener('change', (e) => openFiles([...e.target.files]));
 
     // The bundled demo (built from templates/psn00bsdk): a lone .bin, for which
     // EmulatorJS writes its own .cue.
     $('demo').addEventListener('click', () => start('demo/demo.bin', 'demo'));
 
+    // Drag and drop: games on the picker, memory cards on a running game.
+    let depth = 0;
+    addEventListener('dragenter', (e) => { e.preventDefault(); if (++depth === 1) document.body.classList.add('dragging'); });
+    addEventListener('dragleave', () => { if (--depth === 0) document.body.classList.remove('dragging'); });
+    addEventListener('dragover', (e) => e.preventDefault());
+    addEventListener('drop', (e) => {
+      e.preventDefault();
+      depth = 0; document.body.classList.remove('dragging');
+      const files = [...(e.dataTransfer?.files ?? [])];
+      if (!files.length) return;
+      if (started) {
+        const card = files.find((f) => CARD_EXT.includes(ext(f)));
+        if (card) importCard(card); else toast('A game is running: use "Another game" to switch.');
+      } else openFiles(files);
+    });
+
+    let started = false;
     function start(game, name) {
       const bios = document.querySelector('input[name=bios]:checked').value;
       if (bios === 'file' && !$('biosFile').files[0]) { $('error').textContent = 'Pick your BIOS file first.'; return; }
-
+      started = true;
       $('picker').hidden = true;
       $('box').hidden = false;
+      $('toolbar').hidden = false;
 
       // EmulatorJS configuration — it does all the actual emulation, with the
       // pcsx_rearmed core. Everything is served from the local data/ folder.
@@ -159,6 +219,22 @@
       if (bios === 'openbios') window.EJS_biosUrl = 'data/bios/openbios.bin';
       if (bios === 'file') window.EJS_biosUrl = new File([$('biosFile').files[0]], 'scph1001.bin');
       window.EJS_defaultOptions = { pcsx_rearmed_bios: bios === 'hle' ? 'HLE' : 'auto', pcsx_rearmed_memcard2: 'enabled' };
+      // On-screen gamepad for touch screens, laid out like a PlayStation pad:
+      // face buttons in their real places, D-pad, both pairs of shoulder buttons.
+      // (input_value: the RetroPad id the core maps to that PS1 button.)
+      window.EJS_VirtualGamepadSettings = [
+        { type: 'button', text: '△', id: 'triangle', location: 'right', left: 40, bold: true, input_value: 9 },
+        { type: 'button', text: '□', id: 'square', location: 'right', top: 40, bold: true, input_value: 1 },
+        { type: 'button', text: '○', id: 'circle', location: 'right', left: 81, top: 40, bold: true, input_value: 8 },
+        { type: 'button', text: '✕', id: 'cross', location: 'right', left: 40, top: 80, bold: true, input_value: 0 },
+        { type: 'dpad', id: 'dpad', location: 'left', left: '50%', top: '50%', joystickInput: false, inputValues: [4, 5, 6, 7] },
+        { type: 'button', text: 'Start', id: 'start', location: 'center', left: 60, fontSize: 15, block: true, input_value: 3 },
+        { type: 'button', text: 'Select', id: 'select', location: 'center', left: -5, fontSize: 15, block: true, input_value: 2 },
+        { type: 'button', text: 'L1', id: 'l1', location: 'left', left: 3, top: -90, bold: true, block: true, input_value: 10 },
+        { type: 'button', text: 'L2', id: 'l2', location: 'left', left: 3, top: -140, bold: true, block: true, input_value: 12 },
+        { type: 'button', text: 'R1', id: 'r1', location: 'right', right: 3, top: -90, bold: true, block: true, input_value: 11 },
+        { type: 'button', text: 'R2', id: 'r2', location: 'right', right: 3, top: -140, bold: true, block: true, input_value: 13 },
+      ];
       // Use the built-in English UI so no localization file is fetched.
       window.EJS_language = 'en-US';
       window.EJS_disableAutoLang = false;
@@ -167,6 +243,74 @@
       s.src = 'data/loader.js';
       document.body.appendChild(s);
     }
+    $('otherBtn').addEventListener('click', () => location.reload());
+
+    // ---- Memory card (slot 1 = the core's save file) ----
+    const gm = () => window.EJS_emulator?.gameManager;
+    function readCard() {
+      const g = gm();
+      if (!g) return null;
+      try { g.saveSaveFiles(); } catch {}
+      try { return g.FS.readFile(g.getSaveFilePath()); } catch { return null; }
+    }
+    function writeCard(bytes) {
+      const g = gm(), p = g.getSaveFilePath();
+      try { g.FS.mkdirTree ? g.FS.mkdirTree(p.slice(0, p.lastIndexOf('/'))) : null; } catch {}
+      g.FS.writeFile(p, bytes);
+      g.loadSaveFiles();
+      g.restart();   // the game sees the new card from a fresh boot
+    }
+    function showCard() {
+      const card = readCard();
+      const list = $('saves');
+      list.replaceChildren();
+      if (!card || card.length !== 128 * 1024) {
+        $('cardInfo').textContent = 'No memory card data yet: the game hasn\'t saved. Import a card or format a blank one.';
+      } else {
+        const { saves, freeBlocks, formatted } = listSaves(card);
+        for (const s of saves) {
+          const li = document.createElement('li');
+          if (s.icon) li.append(s.icon);
+          const t = document.createElement('div');
+          t.innerHTML = '<div></div><div class="meta"></div>';
+          t.children[0].textContent = s.title;
+          t.children[1].textContent = `${s.gameId} ${s.region} · ${s.blocks} block${s.blocks > 1 ? 's' : ''}`;
+          li.append(t);
+          list.append(li);
+        }
+        $('cardInfo').textContent = formatted ? `${saves.length} save(s), ${freeBlocks} of 15 blocks free.` : 'The card is not formatted.';
+      }
+      $('cardDlg').showModal();
+    }
+    $('cardBtn').addEventListener('click', showCard);
+    $('cardClose').addEventListener('click', () => $('cardDlg').close());
+    $('cardExport').addEventListener('click', () => {
+      const card = readCard();
+      if (!card) { toast('No memory card data to export yet.'); return; }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([card]));
+      a.download = `${window.EJS_gameName || 'memcard'}.mcr`;
+      a.click();
+    });
+    async function importCard(file) {
+      try {
+        const bytes = rawCard(new Uint8Array(await file.arrayBuffer()));
+        writeCard(bytes);
+        toast(`${file.name} inserted; the game restarted with it.`);
+        if ($('cardDlg').open) { $('cardDlg').close(); showCard(); }
+      } catch (e) { toast(e.message); }
+    }
+    $('cardFile').addEventListener('change', (e) => { if (e.target.files[0]) importCard(e.target.files[0]); e.target.value = ''; });
+    $('cardFormat').addEventListener('click', () => {
+      if (!confirm('Erase every save on this memory card?')) return;
+      writeCard(formatCard());
+      $('cardDlg').close(); showCard();
+      toast('Formatted; the game restarted.');
+    });
+
+    // Installable and offline: the service worker keeps the page, the emulator
+    // and the demo cached after the first visit.
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
   </script>
 </body>
 </html>

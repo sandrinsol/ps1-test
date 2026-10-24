@@ -35,7 +35,7 @@ const MIME = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
   '.css': 'text/css', '.json': 'application/json', '.wasm': 'application/wasm',
   '.data': 'application/octet-stream', '.bin': 'application/octet-stream',
-  '.png': 'image/png', '.map': 'application/json',
+  '.png': 'image/png', '.map': 'application/json', '.webmanifest': 'application/manifest+json',
 };
 
 /** The frame every launch and reset leaves the machine on (see _settle). */
