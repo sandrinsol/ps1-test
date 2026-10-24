@@ -1,6 +1,6 @@
 {
   "name": "ps1-test-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "MCP server + headless harness to test PlayStation (PS1) games and homebrew in EmulatorJS (pcsx_rearmed): input, analog sticks, screenshots, save states, deterministic playback, RAM/VRAM read/write, memory cards — no third-party emulator.",
   "keywords": [
