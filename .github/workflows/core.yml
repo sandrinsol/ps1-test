@@ -1,8 +1,9 @@
 name: core
 
-# Rebuilds the patched pcsx_rearmed core and OpenBIOS from source, so the
-# binaries committed in data/ can be checked against core/ (and replaced with
-# the uploaded artifacts when the sources change).
+# Rebuilds the patched pcsx_rearmed core and OpenBIOS from source and checks
+# that the binaries committed in data/ are exactly what core/ builds (the core
+# build is reproducible: same sources, same bytes, wherever it runs). When the
+# sources change, commit the uploaded artifacts.
 on:
   workflow_dispatch:
   pull_request:
@@ -29,11 +30,14 @@ jobs:
           for k in a:
               print(f"{k}: committed {a[k]}  built {b[k]}  {'same' if a[k] == b[k] else 'DIFFERENT'}")
           if a != b:
-              # Emscripten builds aren't bit-identical across machines, so this is a
-              # note, not a failure; when core/ changes, commit this job's artifact.
-              print('::notice::the rebuilt core differs byte-wise from data/cores (expected across machines); if core/ changed, commit the artifact')
+              # The build is reproducible (build-core.sh maps build paths away), so
+              # the committed binaries must be exactly what core/ builds. When core/
+              # changes, commit this job's artifact (or run core/build-core.sh).
+              print('::error::data/cores does not match a rebuild from core/: commit the rebuilt cores (this job\'s artifact)')
+              raise SystemExit(1)
           PY
-      - uses: actions/upload-artifact@v4
+      - if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: pcsx_rearmed-ps1test
           path: |

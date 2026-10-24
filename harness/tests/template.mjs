@@ -60,6 +60,26 @@ try {
   r = await call('build');
   ok('a compile error is reported as file:line', r.isError && /src\/main\.c:\d+:\d+: error: expected ';'/.test(textOf(r)), textOf(r));
   await writeFile(main, src);
+  // float and double work (libmips1rt's soft-float, not the toolchain's FPU helpers).
+  await writeFile(main, src.replace('\t\tframe_count++;', '\t\tfloat_test();\n\t\tframe_count++;').replace('int main(', `volatile float f_a = 1.5f, f_b = 2.25f;
+volatile double d_r;
+volatile int f_i;
+static void float_test(void) {
+\td_r = (double)(f_a * f_b + f_a / f_b) * 3.0;
+\tf_i = (int)(d_r * 100.0);
+}
+
+int main(`));
+  r = await call('build');
+  ok('a build with float/double math', !r.isError, textOf(r).split('\n')[0]);
+  // The rebuilt disc boots through the BIOS again: wait for the game to run.
+  r = await call('wait_until', { address: 'frame_count', as: 'u32', op: 'gte', value: 10, maxFrames: 900 });
+  ok('the rebuilt game runs', r.structuredContent?.met, textOf(r));
+  r = await call('read_memory', { address: 'f_i', as: 's32' });
+  ok('float/double results are right on the PS1 (1.5*2.25 + 1.5/2.25, *300 → 1212)', r.structuredContent?.values?.[0] === 1212, textOf(r));
+  r = await call('check', { frames: 30 });
+  ok('float/double code runs without CPU exceptions or warnings', !r.isError && r.structuredContent.errors === 0 && r.structuredContent.warnings === 0, textOf(r));
+  await writeFile(main, src);
 } finally {
   await close();
 }

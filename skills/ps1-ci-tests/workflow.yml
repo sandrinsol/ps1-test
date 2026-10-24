@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /opt/psn00bsdk
-          key: psn00bsdk-v0.24-${{ hashFiles('.devcontainer/install-psn00bsdk.sh', '.devcontainer/elf2x-ptload.patch') }}
+          key: psn00bsdk-v0.24-${{ hashFiles('.devcontainer/install-psn00bsdk.sh', '.devcontainer/build-mips1-rt.sh', '.devcontainer/elf2x-ptload.patch') }}
 
       - name: Install the MIPS toolchain and PSn00bSDK
         run: |
