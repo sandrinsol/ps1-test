@@ -69,6 +69,12 @@
         this.writeFile('/home/web_user/retroarch/userdata/config/remaps/PCSX-ReARMed/PCSX-ReARMed.rmp', remap);
         return write.apply(this, a);
       };
+      // No audio sync: RetroArch skips core frames while the WebAudio buffer is
+      // full, so a page whose audio output isn't drained (seen on Windows runners
+      // with several emulator pages open) stops advancing. The clock is driven by
+      // animation frames, and audio is captured from the core directly.
+      const cfg = GM.prototype.getRetroArchCfg;
+      GM.prototype.getRetroArchCfg = function (...a) { return cfg.apply(this, a) + 'audio_sync = false\n'; };
     };
     Object.defineProperty(window, 'EJS_emulator', {
       configurable: true,
