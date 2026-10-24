@@ -1,0 +1,32 @@
+{
+  "name": "ps1-test-mcp",
+  "version": "1.0.0",
+  "description": "MCP server + headless harness to test PlayStation (PS1) games and homebrew in EmulatorJS (pcsx_rearmed + OpenBIOS): input, analog sticks, screenshots, save states, deterministic playback, RAM/VRAM read/write, GPU command capture, memory cards, cheats — no third-party emulator.",
+  "keywords": ["mcp", "ps1", "psx", "playstation", "emulator", "pcsx", "pcsx_rearmed", "emulatorjs", "testing", "ai", "game-testing", "homebrew", "psn00bsdk"],
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "repository": { "type": "git", "url": "git+https://github.com/sandrinsol/ps1-test.git" },
+  "bin": {
+    "ps1-test-mcp": "harness/mcp-server.mjs"
+  },
+  "files": [
+    "data/",
+    "harness/*.mjs",
+    "harness/page.html",
+    "harness/package.json",
+    "harness/README.md",
+    "templates/",
+    "NOTICE.md"
+  ],
+  "scripts": {
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "playwright": "^1.48.0",
+    "zod": "^4.5.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

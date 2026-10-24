@@ -7,6 +7,8 @@ needed).
 
 - **Play:** see below.
 - **Make or test games with an AI agent:** see [harness/README.md](harness/README.md).
+  In Claude Code: `/plugin marketplace add sandrinsol/ps1-test`, then
+  `/plugin install ps1-test@ps1-test`.
   The agent can build your game, read its variables by name, see every GPU
   command a frame sends, check it against hardware rules, and start new games
   from the [PSn00bSDK template](templates/psn00bsdk).
@@ -40,8 +42,13 @@ The bar at the bottom has pause, save states, fullscreen, volume and settings
 (including gamepads and the controller type). Memory cards are kept in the
 browser's local storage.
 
-To host it, deploy the folder as a static site (no build step); `netlify.toml` is
-included for Netlify.
+To host it, deploy the folder as a static site (no build step). It's set up for
+Vercel: import the repository at vercel.com/new (or run `npx vercel` in the
+folder) and keep the defaults — `vercel.json` skips the install and build, serves
+the folder as is and sets cache headers for the core files, and `.vercelignore`
+leaves the test harness and templates out of the deployment.
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fsandrinsol%2Fps1-test)
 
 ## License
 

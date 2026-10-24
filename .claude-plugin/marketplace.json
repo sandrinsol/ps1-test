@@ -1,0 +1,14 @@
+{
+  "name": "ps1-test",
+  "owner": {
+    "name": "sandrinsol"
+  },
+  "description": "PlayStation (PS1) testing and development tools for Claude Code.",
+  "plugins": [
+    {
+      "name": "ps1-test",
+      "source": "./",
+      "description": "Play, test and debug PS1 discs and homebrew from Claude Code."
+    }
+  ]
+}

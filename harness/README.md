@@ -11,10 +11,24 @@ downloaded at runtime.
 - A PSn00bSDK starter game that builds, runs and passes a test from the start
   ([`templates/psn00bsdk`](../templates/psn00bsdk)), and the same game as a ready
   disc in [`demo/`](../demo).
+- A Claude Code plugin bundling the server with skills (testing, playtesting, CI,
+  homebrew development, PSn00bSDK, hardware reference, performance, real hardware)
+  and two agents, `ps1-tester` and `ps1-reviewer`
+  ([`skills/`](../skills/), [`agents/`](../agents/)).
 
 ## Setup
 
 Node 20+.
+
+**Claude Code:** install the plugin (server + skills + agents; dependencies install
+on first start):
+
+```
+/plugin marketplace add sandrinsol/ps1-test
+/plugin install ps1-test@ps1-test
+```
+
+**Other MCP hosts**, or to work on the harness:
 
 ```bash
 cd harness
@@ -35,7 +49,8 @@ Add the server to your MCP host:
 }
 ```
 
-VS Code uses the key `"servers"` instead of `"mcpServers"`.
+VS Code uses the key `"servers"` instead of `"mcpServers"`
+([`.vscode/mcp.json.example`](../.vscode/mcp.json.example)).
 
 | Variable | Effect |
 |----------|--------|
@@ -251,4 +266,12 @@ npm test               # all suites (unit, core, script, mcp, template — skipp
 npm run typecheck      # JSDoc types
 npm run fixtures       # rebuild tests/fixtures from src/ (needs a mipsel GCC)
 PSN00BSDK_LIBS=… node tests/template.mjs   # the template end to end (needs PSn00bSDK)
+npm run package-test   # pack, install into an empty project, drive an EXE
 ```
+
+Releases: bump `version` in the repo-root `package.json`, this folder's
+`package.json` and `.claude-plugin/plugin.json` (`package-test` checks they match),
+optionally add `.github/release-notes/v<version>.md`, and merge to `main`: the
+`release` workflow tags it and publishes a GitHub release. The repo-root
+`package.json` describes the npm package (`ps1-test-mcp` bin); it isn't published
+to npm.

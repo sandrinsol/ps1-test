@@ -1,0 +1,15 @@
+# Only the play page is deployed: index.html, data/ (EmulatorJS, the core,
+# OpenBIOS) and demo/. The rest is the test harness and its sources.
+harness/
+templates/
+core/
+skills/
+agents/
+.claude-plugin/
+.github/
+.vscode/
+demo/*.elf
+demo/*.exe
+demo/build.sh
+PLAN.md
+start.command
