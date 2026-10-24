@@ -40,9 +40,14 @@ const STATUS = (s) => [s & 1 ? 'error' : '', s & 2 ? 'motor' : '', s & 4 ? 'seek
 
 /** Which file holds sector `lba` (files from disc.mjs isoList). */
 export function fileAt(files, lba) {
-  for (const f of files) if (!f.dir && lba >= f.lba && lba < f.lba + Math.max(1, Math.ceil(f.size / 2048))) return f;
+  for (const f of files) {
+    if (lba < f.lba || lba >= f.lba + Math.max(1, Math.ceil(f.size / 2048))) continue;
+    return f.dir && !f.system ? { ...f, path: `${f.path}/ (directory)` } : f;
+  }
   return null;
 }
+/** "(/FILE.BIN +3)" — or "(path table)" for the file system's own sectors, without doubled parentheses. */
+const inParens = (s) => (s.startsWith('(') ? s : `(${s})`);
 
 /**
  * Readable summary: one line per command (with its answers), sector reads folded
@@ -80,7 +85,7 @@ export function summarizeCd(entries, { files = [], name = () => null, cyclesPerF
       if (e.name === 'Setloc' && e.params.length === 3) {
         const lba = msfToLba(bcd(e.params[0]), bcd(e.params[1]), bcd(e.params[2]));
         const f = fileAt(files, lba);
-        p = `${e.params.map(hex2).join(':')} = sector ${lba}${f ? ` (${f.path}${lba > f.lba ? ` +${lba - f.lba}` : ''})` : ''}`;
+        p = `${e.params.map(hex2).join(':')} = sector ${lba}${f ? ` ${inParens(`${f.path}${lba > f.lba ? ` +${lba - f.lba}` : ''}`)}` : ''}`;
       }
       const fn = name(e.pc);
       lines.push(`${when(e.cycle)} ${e.name}${p ? ' ' + p : ''}${fn ? `  [from ${fn}]` : ''}`);
