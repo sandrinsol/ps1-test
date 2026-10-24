@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Rebuild data/cores/pcsx_rearmed-wasm.data: the EmulatorJS pcsx_rearmed core
-# with core/pcsx_rearmed-ps1test.patch applied (a GPU command / CPU exception log
-# and pointers to RAM and VRAM for the ps1-test harness), linked by EmulatorJS's
+# with core/pcsx_rearmed-ps1test.patch applied (a GPU / CD-ROM / CPU exception
+# log, pointers to RAM, VRAM and SPU RAM, and a debugger: breakpoints,
+# watchpoints, stepping and a profiler, for the ps1-test harness), linked by EmulatorJS's
 # RetroArch fork exactly as the stock EmulatorJS 4.2.3 core was. GPL-2.0+; the
 # patch is the only change, so this script plus the patch are the source.
 #
@@ -56,8 +57,8 @@ rm -rf RetroArch EmulatorJS
 git clone "$RA_REPO" RetroArch
 git -C RetroArch checkout -q "$RA_COMMIT"
 # Export the harness's functions too.
-sed -i 's/_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply$/_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply, \\\n                     _ps1test_log_ctl,_ps1test_log_buf,_ps1test_log_len,_ps1test_log_flags,_ps1test_ptr/' RetroArch/Makefile.emulatorjs
-grep -q _ps1test_ptr RetroArch/Makefile.emulatorjs
+sed -i 's/_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply$/_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply, \\\n                     _ps1test_log_ctl,_ps1test_log_buf,_ps1test_log_len,_ps1test_log_flags,_ps1test_ptr, \\\n                     _ps1test_dbg_block,_ps1test_prof_buf,_ps1test_regs,_ps1test_step,_ps1test_spu_ptr,_ps1test_spu_state/' RetroArch/Makefile.emulatorjs
+grep -q _ps1test_spu_state RetroArch/Makefile.emulatorjs
 mkdir -p EmulatorJS/data/cores
 # WebGL 2 build, then the WebGL 1 ("legacy") one EmulatorJS falls back to.
 cp pcsx_rearmed/pcsx_rearmed_libretro_emscripten.bc RetroArch/emulatorjs/

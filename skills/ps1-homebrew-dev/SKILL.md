@@ -57,13 +57,16 @@ Link small assets with `psn00bsdk_target_incbin`; put large ones on the disc
 |---|---|---|
 | Black screen | `describe`, `check` | Display never enabled (`SetDispMask(1)`), DISPENV pointing at an empty buffer, crashed before the first frame (exception) |
 | Stuck in the BIOS / boot screen | `check`, `read_cpu` | Disc not bootable (`SYSTEM.CNF`, EXE name) — `build`/`check` report it; EXE loads below 0x80010000 |
-| Crash, freeze | `check` (exception + function), `read_cpu` | Unaligned access (packed struct, `char*` cast to `int*`), null pointer, reserved instruction (MIPS32 code from the wrong libgcc), stack overflow |
+| Crash, freeze | `check` (exception + function), `debug` `where` | Unaligned access (packed struct, `char*` cast to `int*`), null pointer, reserved instruction (MIPS32 code from the wrong libgcc), stack overflow |
 | Sprite missing | `gpu_capture`, `view_vram gpu:true` | Never added to the OT, off-screen or outside the drawing area, CLUT all zero (not uploaded), texture page not set (sprites use the last E1), wrong colour depth |
 | Garbage texture | `view_vram`, `texture` export | Texture crosses a 64-word page boundary, uploaded over a framebuffer, UVs not relative to the page |
 | Flicker / half-drawn frame | `gpu_capture` | Drawing into the displayed buffer (DrawSync/VSync/swap order), primitive buffer overflow |
 | Giant/missing polygons | `check` | Polygon over 1023×511 (GTE values overflowed, vertex behind the camera not culled) |
-| Slowdown | `check` with the frame counter, `describe` `cpu_usage` | See `ps1-performance` |
-| No sound | `read_memory` 0x1F801DAA (SPUCNT), `check` | SPU not initialised, sample uploaded below 0x1010 or not 8-byte aligned, volume 0, KON not written |
+| A variable gets a wrong value | `debug` watchpoint on it (`changed: true`), `run` | The instruction and function that wrote it; `halt: false` lists every write |
+| Code never reached / reached too often | `debug` breakpoint with `halt: false`, `run` | Hit count and callers per frame |
+| Slowdown | `profile`, `check` with the frame counter | See `ps1-performance` |
+| No sound | `spu` (voices, SPUCNT), `spu` `export` to hear the sample | SPU off or muted, sample uploaded below 0x1010 or not 8-byte aligned, pitch 0, volume 0, KON not written, ADSR stuck in release |
+| Slow or stuck loading | `cdrom` | Seeks to the wrong sector (`Setloc` mapped to files), read errors (INT5), polling the drive in a loop |
 | Input ignored | `describe`, pad buffer in `read_memory` | Reading before the BIOS fills the buffer (type 0), buttons are active-low, analog fields read on a digital pad |
 | Save fails | `memory_card list` | Card not formatted, filename/region prefix wrong, title frame missing |
 

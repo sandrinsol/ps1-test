@@ -60,3 +60,12 @@ from `.elf`/`.map`), `read_cpu` (R3000A + COP0 + GTE regs), `status`, `state`,
 4. Sample demo + PSn00bSDK template + `build` / `new_project`.
 5. Converters: TIM, VAG, Tiled, OBJ, LUTs.
 6. Skills, agents, plugin manifests, CI, release workflow, docs.
+
+### Improvements (after v1.0.0)
+
+7. Quick fixes: working `new` command in the skill, npm publishing with `NPM_TOKEN`, play-page smoke test on every Vercel deployment, Windows in CI.
+8. Debugger (`debug`: breakpoints, watchpoints, stepping, where/call stack) and profiler (`profile`), in the core.
+9. Sound and disc inspection: `spu` (voices, sample export) and `cdrom` (command log mapped to disc files); CD errors in `check`.
+10. Toolchains (`mipsel-none-elf` in the dev container, a nugget/C++ template), a `disc` tool, `send_to_console` (Unirom serial upload).
+11. Play page: drag and drop, touch controls, memory card import/export, installable offline (PWA).
+12. Reproducible core builds: CI rebuilds the core bit-identically and fails on a mismatch.

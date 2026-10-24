@@ -30,10 +30,15 @@ give the same frames, RAM and GPU commands.
      with `ignore`),
    - values: `read_memory` / `assertRam` steps,
    - health: `check` (exceptions, hangs, lag, CPU load, GPU and memory rules).
-6. Don't know where a value lives? `ram_search` `start` (type `u16` first — PS1
+6. Something changes a value and you don't know what: `debug` `set` a watchpoint
+   (`watch: [{address: "hp", on: "write", changed: true}]`), `run` — it stops on
+   the instruction that wrote it, with the function, the disassembly and a call
+   stack. `halt: false` logs every write instead. Breakpoints work the same way
+   on functions (`break: ["player_hit"]`); `step` goes one instruction at a time.
+7. Don't know where a value lives? `ram_search` `start` (type `u16` first — PS1
    games usually keep counters in 16 or 32 bits), change it in game, `filter`
    until one address is left, confirm with `write_memory`.
-7. Turn the session into a test: `export_script`, add `assert` / `assertRam`
+8. Turn the session into a test: `export_script`, add `assert` / `assertRam`
    steps, replay it with `run_sequence` to prove it passes.
 
 ## Useful facts
@@ -52,6 +57,9 @@ give the same frames, RAM and GPU commands.
 - Memory cards: `memory_card` `list` shows saves (title, blocks, icon); `import`
   boots with a card image; `format` inserts a blank one.
 - Save states (`state` `save` / `load`) are the fastest way to retry from a point.
+- Slow game: `profile` shows the share of time per function. No sound: `spu`
+  shows the voices (and `export`s a sample to WAV). Long loads or a hang while
+  loading: `cdrom` logs the drive's commands, errors and the files read.
 - For a person: `record_video` (.gif plays everywhere, .mp4 has sound), or
   `run_sequence` with `video: {path}` to keep a clip only when a check fails.
 

@@ -19,6 +19,10 @@ import { encodeVag, decodeAdpcm, encodeWav16, vagFile, readVag, makeTable, conve
 import { convertTilemap, writeTilemap } from '../tilemap.mjs';
 import { encodePng, decodePng } from '../png.mjs';
 import { RunChecker } from '../checks.mjs';
+import { disasm, isReturnAddress } from '../mips.mjs';
+import { decodeCdLog, summarizeCd, msfToLba } from '../cdrom.mjs';
+import { isoList, dataTrack } from '../disc.mjs';
+import { profileTable, functionOf } from '../debugger.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp } from 'node:fs/promises';
@@ -224,6 +228,52 @@ ok('decodeLog: exception', dec.exceptions[0]?.code === 4 && dec.exceptions[0].ba
   const c = new RunChecker({ symbols: { nameOf: () => '__bswapsi2' } });
   c.observe({ regions: { gpuStatus: 0, gpuControl: Buffer.alloc(1024), vram: Buffer.alloc(1024 * 1024) }, cpu: { pc: 0x80010000, sp: 0x801fff00 }, cap: { exceptions: [{ code: 10, epc: 0x80010980, badVaddr: 0 }], prims: [], chains: [], env: { drawArea: { x0: 0, y0: 0, x1: 319, y1: 239 } } } });
   ok('check explains an RI exception in a compiler helper', c.findings().some((f) => /reserved instruction.*__bswapsi2.*MIPS32r2/.test(f.msg)));
+}
+
+// --- MIPS disassembler ---
+{
+  const d = (w, pc = 0x80010000) => disasm(w, pc, (a) => (a === 0x80010100 ? 'player_update' : null)).text;
+  ok('disasm: nop, li, lui, ori', d(0) === 'nop' && d(0x24020005) === 'li v0, 0x5' && d(0x3c048001) === 'lui a0, 0x8001' && d(0x34840394) === 'ori a0, a0, 0x394');
+  ok('disasm: loads/stores with signed offsets', d(0x8fbf0014) === 'lw ra, 0x14(sp)' && d(0xa4a2fffe) === 'sh v0, -0x2(a1)');
+  ok('disasm: jal names its target', d(0x0c004040) === 'jal 0x80010100 <player_update>' && disasm(0x0c004040, 0x80010000).isCall);
+  ok('disasm: branches resolve relative targets', d(0x1440fffe) === 'bne v0, zero, 0x8000fffc' && d(0x10000003) === 'b 0x80010010');
+  ok('disasm: jr ra, addu → move, GTE', d(0x03e00008) === 'jr ra' && d(0x00801021) === 'move v0, a0' && d(0x4a280030) === 'rtpt');
+  ok('isReturnAddress: jal/jalr yes, others no', isReturnAddress(0x0c004040) && isReturnAddress(0x0040f809) && !isReturnAddress(0x24020005));
+}
+
+// --- CD-ROM log ---
+{
+  const words = [];
+  const put = (type, cycle, w) => { words.push(((type << 28) | w.length) >>> 0, cycle, ...w); };
+  put(5, 1000, [0x02 | (3 << 8), 0x002400, 0, 0, 0, 0x80012340]);         // Setloc 00:24:00 (BCD 0x00 0x24 0x00) from 0x80012340
+  put(6, 2000, [3 | (2 << 8) | (1 << 24), 0x02, 0, 0, 0]);                // INT3 ack, stat 02
+  put(5, 3000, [0x06, 0, 0, 0, 0, 0x80012360]);                           // ReadN
+  for (let k = 0; k < 3; k++) put(7, 4000 + k, [0x00 | (24 << 8) | (k << 16)]); // 00:24:00..02
+  put(6, 9000, [5 | (6 << 8) | (2 << 24), 0x03 | (0x04 << 8), 0, 0, 0]);   // INT5 error after ReadN
+  const buf = Buffer.from(Uint32Array.from(words).buffer);
+  const e = decodeCdLog(buf);
+  ok('decodeCdLog: commands, answers and reads', e.length === 7 && e[0].name === 'Setloc' && e[0].params.join() === '0,36,0' && e[3].type === 'read' && e[3].lba === msfToLba(0, 24, 0));
+  const files = [{ path: '/DATA.BIN', lba: msfToLba(0, 24, 0), size: 3 * 2048, dir: false }];
+  const sum = summarizeCd(e, { files, name: (a) => (a === 0x80012340 ? 'load_level' : null) });
+  ok('summarizeCd: Setloc mapped to a file, reads folded, answers inline, errors counted',
+    /Setloc 00:24:00 = sector 1650 \(\/DATA\.BIN\)  \[load_level\] → ack/.test(sum.text) && /read 3 sector\(s\) 1650-1652 \(00:24:00\) \/DATA\.BIN/.test(sum.text)
+    && /→ ERROR stat 03/.test(sum.text) && sum.errors === 1 && sum.sectors === 3 && sum.filesRead === '/DATA.BIN (3)', sum.text);
+}
+
+// --- ISO file listing ---
+{
+  const img = await dataTrack(path.join(FIX, 'hello.cue'));
+  const list = isoList(img);
+  const names = list.map((f) => f.path);
+  ok('isoList: files plus the file system\'s own sectors', names.includes('/SYSTEM.CNF') && names.some((n) => /\.EXE$/.test(n)) && names.includes('(volume descriptor)') && list.find((f) => f.path === '(volume descriptor)').lba === 16, names.join(' '));
+}
+
+// --- Profiler table ---
+{
+  const sym = { nameOf: (a) => (a >= 0x80010000 && a < 0x80010100 ? `main+${a - 0x80010000}` : a >= 0x80010100 && a < 0x80010200 ? `vsync_wait+${a - 0x80010100}` : null) };
+  const samples = Uint32Array.from([...Array(30).fill(0x80010010), ...Array(70).fill(0x80010104), 0xbfc00100]);
+  const t = profileTable(samples, sym, { top: 5 });
+  ok('profileTable: shares per function, waiting counted', /69\.3%\s+vsync_wait/.test(t.text) && /29\.7%\s+main/.test(t.text) && Math.round(t.idlePct) === 70 && functionOf(0xbfc00100, sym) === '(BIOS ROM)', t.text);
 }
 
 done();

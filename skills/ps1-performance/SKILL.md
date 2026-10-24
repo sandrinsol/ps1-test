@@ -20,6 +20,9 @@ either side doesn't finish in time.
 - `check` with `frames` over the slow part: lag frames (VSyncs the loop missed),
   min/average/max CPU %, primitives per frame, primitives dropped or off-screen.
 - `describe` with `watch` on `cpu_usage` shows the cost of each action as you play.
+- `profile` (`frames` over the slow part) samples the pc every 256 CPU cycles and
+  lists the share of time per function, with the time spent waiting for VSync
+  apart: the first place to look, before timing sections by hand.
 - Time sections: read `TIMER_VALUE(1)` (scanlines) before and after into globals
   (`t_ai`, `t_draw`) and `read_memory` them.
 - CPU low but still lagging → the GPU is the bottleneck: measure the time spent in

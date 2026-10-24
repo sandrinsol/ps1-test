@@ -368,10 +368,10 @@ index c14f6469..f5437ad1 100644
  
  static int iFMod[NSSIZE];
 diff --git a/plugins/gpulib/gpu.c b/plugins/gpulib/gpu.c
-index e82cc0e6..b3b1fd57 100644
+index e82cc0e6..b7254e97 100644
 --- a/plugins/gpulib/gpu.c
 +++ b/plugins/gpulib/gpu.c
-@@ -28,6 +28,84 @@
+@@ -28,6 +28,85 @@
  
  struct psx_gpu gpu;
  
@@ -440,7 +440,8 @@ index e82cc0e6..b3b1fd57 100644
 +}
 +EMSCRIPTEN_KEEPALIVE uint32_t *ps1test_log_buf(void) { return ps1test_log; }
 +EMSCRIPTEN_KEEPALIVE int ps1test_log_len(void) { return ps1test_log_used; }
-+EMSCRIPTEN_KEEPALIVE int ps1test_log_flags(void) { return ps1test_log_on | (ps1test_log_overflow << 1); }
++/* bits 0-7: what is logged (see ps1test_log_ctl), bit 8: the log overflowed */
++EMSCRIPTEN_KEEPALIVE int ps1test_log_flags(void) { return (ps1test_log_on & 0xff) | (ps1test_log_overflow << 8); }
 +/* 0: main RAM (2 MB), 1: scratchpad + I/O (64 KB), 2: VRAM (1 MB), 3: BIOS (512 KB) */
 +EMSCRIPTEN_KEEPALIVE void *ps1test_ptr(int which)
 +{
@@ -456,7 +457,7 @@ index e82cc0e6..b3b1fd57 100644
  static noinline int do_cmd_buffer(struct psx_gpu *gpu, uint32_t *data, int count,
      int *cycles_sum, int *cycles_last);
  static noinline void finish_vram_transfer(struct psx_gpu *gpu, int is_read);
-@@ -310,6 +388,7 @@ long GPUshutdown(void)
+@@ -310,6 +389,7 @@ long GPUshutdown(void)
  void GPUwriteStatus(uint32_t data)
  {
    uint32_t cmd = data >> 24;
@@ -464,7 +465,7 @@ index e82cc0e6..b3b1fd57 100644
    uint32_t fb_dirty = 1;
    int src_x, src_y;
  
-@@ -772,6 +851,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
+@@ -772,6 +852,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
    if (unlikely(gpu.cmd_len > 0))
      flush_cmd_buffer(&gpu);
  
@@ -472,7 +473,7 @@ index e82cc0e6..b3b1fd57 100644
    left = do_cmd_buffer(&gpu, mem, count, &dummy, &dummy);
    if (left)
      log_anomaly(&gpu, "GPUwriteDataMem: discarded %d/%d words\n", left, count);
-@@ -780,6 +860,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
+@@ -780,6 +861,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
  void GPUwriteData(uint32_t data)
  {
    log_io(&gpu, "gpu_write %08x\n", data);
@@ -480,7 +481,7 @@ index e82cc0e6..b3b1fd57 100644
    gpu.cmd_buffer[gpu.cmd_len++] = HTOLE32(data);
    if (gpu.cmd_len >= CMD_BUFFER_LEN)
      flush_cmd_buffer(&gpu);
-@@ -799,6 +880,10 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
+@@ -799,6 +881,10 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
      flush_cmd_buffer(&gpu);
  
    log_io(&gpu, "gpu_dma_chain\n");
@@ -491,7 +492,7 @@ index e82cc0e6..b3b1fd57 100644
    addr = ld_addr = start_addr & 0xffffff;
    for (count = 0; (addr & 0x800000) == 0; count++)
    {
-@@ -813,6 +898,8 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
+@@ -813,6 +899,8 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
  
      log_io(&gpu, ".chain %08lx #%d+%d %u+%u\n",
        (long)(list - rambase) * 4, len, gpu.cmd_len, cpu_cycles_sum, cpu_cycles_last);

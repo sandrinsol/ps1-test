@@ -76,6 +76,10 @@ VS Code uses the key `"servers"` instead of `"mcpServers"`
 | `screenshot` | Current frame as an image (2× by default). |
 | `read_memory` | Read RAM, the scratchpad, I/O ports or the BIOS; addresses as numbers, hex strings (`"0x80010000"`) or symbols. |
 | `read_cpu` | R3000A registers, COP0 status/cause, GTE registers; names the function the PC is in. |
+| `debug` | A debugger. `set` breakpoints (stop before an address or function) and watchpoints (reads/writes of a RAM range, optionally only changes or values matching a condition), `run` until the first hit — the CPU stops mid-frame, on the exact instruction — or log every hit with `halt: false`, `step` instructions, `where` (disassembly around the pc, registers, a probable call stack), `hits`, `clear`. Frame numbers stay those of a run without the debugger. |
+| `profile` | Run frames sampling the pc every N CPU cycles: the share of time per function (from the symbols), and how much is spent waiting for VSync or in the BIOS. |
+| `spu` | The sound chip: which of the 24 voices play, their ADSR phase, envelope, pitch in Hz, volume and SPU RAM addresses, and SPUCNT; `export` decodes the ADPCM sample a voice plays (or at an address) to a WAV. |
+| `cdrom` | Run frames logging the CD-ROM drive: each command (with its parameters and the function that sent it) and the drive's answers, sector reads folded into runs and mapped to the disc's files, errors, and which files were read. |
 | `gpu_capture` | Run a frame logging every GPU command: the primitives drawn (polygons, sprites, lines, fills, VRAM transfers) with their box, colour, texture page and CLUT, and for DMA-chain packets the RAM address and symbol; plus the drawn buffer with each one outlined. |
 | `view_vram` | The whole 1024×512 VRAM with the display and draw areas (and, with `gpu: true`, the texture pages and CLUTs in use) outlined, or one texture decoded through its CLUT. |
 | `describe` | The machine as text, far cheaper than a screenshot: where the CPU is, watched variables, display mode, how much of the screen changed; `gpu: true` adds what the next frame draws. `watch` sets the variables every step reports. |
@@ -95,7 +99,7 @@ VS Code uses the key `"servers"` instead of `"mcpServers"`
 | `background` | A PNG or Tiled map (`.tmx`/`.tmj`) → identical tiles merged, the unique ones packed into a tileset TIM, plus the map of tile numbers as C; returns a preview rebuilt from the output. |
 | `data` | `sound`: WAV → SPU ADPCM (`.vag`, raw, C, or a `.wav` of the result to listen to), looping or one-shot, with the voice pitch value. `table`: fixed-point sin/cos/reciprocal lookup tables (4096 steps per turn). `mesh`: Wavefront `.obj` → `SVECTOR` vertices and normals plus triangle and quad lists (in the GPU's vertex order) for the GTE. |
 | `new_project` | Copy a starter template (`psn00bsdk`): text, a player sprite, a GTE cube, a smoke test with goldens, `ps1test.json`, a CI workflow and a dev container. |
-| `check` | Hardware rules: the PS-EXE header and `SYSTEM.CNF` (region marker, load address, entry, size), then a short run watching for CPU exceptions (unaligned or bad addresses, bus errors, …, with the faulting function), hangs, lag frames (`frameCounter`), CPU load (`cpu_usage`), a blank or frozen screen, polygons the GPU drops (> 1023×511), primitives outside the drawing area, textures and CLUTs inside the framebuffer, all-zero CLUTs, DMA from outside RAM, unaligned DMA chains, and the stack reaching the program's data. |
+| `check` | Hardware rules: the PS-EXE header and `SYSTEM.CNF` (region marker, load address, entry, size), then a short run watching for CPU exceptions (unaligned or bad addresses, bus errors, …, with the faulting function), hangs, lag frames (`frameCounter`), CPU load (`cpu_usage`), a blank or frozen screen, polygons the GPU drops (> 1023×511), primitives outside the drawing area, textures and CLUTs inside the framebuffer, all-zero CLUTs, DMA from outside RAM, unaligned DMA chains, the stack reaching the program's data, and CD-ROM drive errors. |
 
 Prompts: `smoke_test_rom`, `regression_check`, `find_ram_address`,
 `record_regression_test`. Resources: `emu://screen`, `emu://status`.
@@ -234,6 +238,11 @@ and `exe.mjs` turns an `.elf` into a PS-EXE.
 - **Exceptions are emulated**, as on the console: an unaligned or bad-address
   load or store raises an address/bus error instead of quietly working, so code
   that would crash on hardware crashes here too.
+- **The debugger** sees what the CPU does: watchpoints catch CPU loads and stores
+  (not DMA, e.g. CD sectors arriving in RAM), and the call stack is a heuristic
+  (MIPS code keeps no frame pointers). Waits run at 1× while breakpoints,
+  watchpoints or the profiler are on. After a stop mid-frame, the next wait first
+  finishes that frame.
 - **Writes to memory** apply on the current frame. A value the game recomputes every
   frame is overwritten on the next one; `write_memory` says when that happens.
 - **Save states** don't store the picture. Loading a state file from another session
@@ -254,8 +263,12 @@ The bundled core is EmulatorJS's PCSX-ReARMed build with a small patch
 by `core/build-core.sh` and the `core` workflow): it exports pointers to the
 emulated RAM, scratchpad, I/O, VRAM and BIOS, so memory is read and written in
 place, and it logs every GPU command (with the RAM address of each DMA-chain
-packet) and CPU exception while the harness asks it to: `gpu.mjs` decodes that log
-into primitives. Registers, VRAM for images, and anything the stock core can't
+packet), CPU exception and CD-ROM command, answer and sector read while the
+harness asks it to: `gpu.mjs` and `cdrom.mjs` decode that log. The interpreter
+also checks breakpoints, watchpoints and a profiler's sampling clock before each
+instruction and load/store when they are set (a block of words the page shares
+with the core: `debugger.mjs`, `mips.mjs` for the disassembly), and the SPU's
+voices and sound RAM are exported for `spu`. Registers, VRAM for images, and anything the stock core can't
 give come from the core's save states: `psx-memory.mjs` parses pcsx_rearmed's format
 (and the harness falls back to it entirely with a stock core).
 

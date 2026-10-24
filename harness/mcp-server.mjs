@@ -37,7 +37,9 @@ import { saveVideo } from './recording.mjs';
 import { RamSearch, SEARCH_OPS, SEARCH_TYPES } from './ramsearch.mjs';
 import { runSteps, decodeValues, encodeValue, VALUE_TYPES } from './steps.mjs';
 import { runCommand, parseDiagnostics, formatDiagnostic, detectBuild, findRom, readProjectConfig } from './build.mjs';
-import { discFiles, dataTrack } from './disc.mjs';
+import { discFiles, dataTrack, isoList } from './disc.mjs';
+import { hitLine, whereText, profileTable } from './debugger.mjs';
+import { summarizeCd } from './cdrom.mjs';
 import { primLine, captureImage, vramPng, texturePng, stateDrawEnv } from './gpu.mjs';
 import { display } from './psx-memory.mjs';
 import { listSaves, formatCard } from './mcard.mjs';
@@ -45,7 +47,7 @@ import { exeIssues, discIssues, RunChecker } from './checks.mjs';
 import { TEMPLATES, createProject } from './templates.mjs';
 import { convertTim, readTim, timToPng, timToC } from './tim.mjs';
 import { convertTilemap, writeTilemap, renderTiledMap } from './tilemap.mjs';
-import { encodeVag, writeSound, makeTable, writeTable, convertMesh, writeMesh } from './gamedata.mjs';
+import { encodeVag, writeSound, makeTable, writeTable, convertMesh, writeMesh, decodeAdpcm, encodeWav16 } from './gamedata.mjs';
 import { vramImage, outline } from './gpu.mjs';
 import { encodePng } from './png.mjs';
 
@@ -398,6 +400,122 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
     }
     const at = emu.symbols?.nameOf(c.pc), ra = emu.symbols?.nameOf(c.ra);
     return result(`Frame ${await emu.frameNum()}: ${lines.join('\n')}${at ? `\nin ${at}` : ''}${ra ? `, returns to ${ra}` : ''}`, { pc: c.pc });
+  });
+
+  // ---- Debugger, profiler, SPU, CD-ROM (instrumented core) ----
+  const Watch = z.object({
+    address: Address, length: z.number().int().min(1).max(0x200000).default(4),
+    on: z.enum(['write', 'read', 'access']).default('write'),
+    changed: z.boolean().default(false).describe('writes that change the value only'),
+    op: z.enum(['eq', 'ne', 'lt', 'gt', 'lte', 'gte']).optional(), value: z.number().int().optional(),
+  });
+  const where = async () => whereText(await emu.debugState(), (a, n) => emu.readMemory(a, n), emu.symbols);
+  tool('debug', {
+    description: 'Breakpoints (exec) and watchpoints (read/write of RAM, with a value condition): set them, run until a hit (stops mid-frame) or log hits, step instructions, show where the CPU is (disassembly, registers, call stack).',
+    inputSchema: {
+      action: z.enum(['set', 'run', 'step', 'where', 'hits', 'clear']),
+      break: z.array(Address).max(16).optional().describe('set: stop before these addresses/functions'),
+      watch: z.array(Watch).max(16).optional(),
+      halt: z.boolean().default(true).describe('set: stop at the first hit (false: only log hits)'),
+      frames: z.number().int().min(1).max(3600).default(600).describe('run: at most this many frames'),
+      count: z.number().int().min(1).max(10000).default(1).describe('step: instructions'),
+    },
+  }, async (a) => {
+    if (a.action === 'clear') { await emu.debugOff(); return result(`Breakpoints and watchpoints cleared. Frame ${await emu.frameNum()}.`); }
+    if (a.action === 'set') {
+      if (!a.break?.length && !a.watch?.length) throw new Error('give `break` and/or `watch`');
+      await emu.debugSet({ exec: a.break ?? [], watch: a.watch ?? [], halt: a.halt });
+      const parts = [...(a.break ?? []).map((b) => `break ${label(emu.addr(b))}`), ...(a.watch ?? []).map((w) => `${w.on} ${label(emu.addr(w.address))}${w.length !== 4 ? ` +${w.length}B` : ''}${w.changed ? ' (changes)' : ''}${w.op ? ` ${w.op} ${w.value ?? 0}` : ''}`)];
+      return result(`Set: ${parts.join('; ')}. ${a.halt ? 'The CPU stops at the first hit' : 'Hits are logged'}; use action "run".`);
+    }
+    if (a.action === 'run') {
+      const f0 = await emu.frameNum();
+      await emu.waitFrames(a.frames);
+      const st = await emu.debugState(), f1 = await emu.frameNum();
+      record({ wait: Math.max(0, f1 - f0) });
+      if (st.halted) {
+        const h = st.hits[st.hits.length - 1];
+        return result(`Stopped in frame ${f1} (mid-frame): ${hitLine(h, { symbols: emu.symbols, label })}\n${await where()}`, { frame: f1, halted: true, pc: st.regs.pc });
+      }
+      const lines = st.hits.map((h) => hitLine(h, { symbols: emu.symbols, label }));
+      return result(`Ran to frame ${f1}: ${st.total ? `${st.total} hit(s)` : 'no hits'}.${lines.length ? '\n' + lines.slice(-20).join('\n') : ''}${st.total > lines.length ? `\n(first ${lines.length} kept)` : ''}` + await watchLine(), { frame: f1, halted: false, hits: st.total });
+    }
+    if (a.action === 'step') {
+      const st0 = await emu.debugState();
+      if (!st0.halted) throw new Error('not stopped: step works after a "run" stops at a hit');
+      const n = await emu.debugStep(a.count);
+      return result(`Stepped ${n} instruction(s).\n${await where()}`);
+    }
+    if (a.action === 'hits') {
+      const st = await emu.debugState();
+      return result(st.total ? st.hits.map((h) => hitLine(h, { symbols: emu.symbols, label })).join('\n') + (st.total > st.hits.length ? `\n(${st.total} in all; first ${st.hits.length} kept)` : '') : 'No hits.');
+    }
+    const st = await emu.debugState();
+    return result(`Frame ${await emu.frameNum()}${st.partial ? ' (stopped mid-frame)' : ''}:\n${await where()}`, { pc: st.regs.pc });
+  });
+
+  tool('profile', {
+    description: 'Run frames sampling where the CPU spends its time: share per function (needs symbols for names). Waiting for VSync shows as idle time.',
+    inputSchema: {
+      frames: z.number().int().min(1).max(600).default(60),
+      interval: z.number().int().min(16).max(65536).default(256).describe('CPU cycles between samples'),
+      top: z.number().int().min(1).max(100).default(15),
+    },
+  }, async ({ frames, interval, top }) => {
+    const f0 = await emu.frameNum();
+    const { samples, full } = await emu.profile(frames, { interval });
+    record({ wait: frames });
+    const t = profileTable(samples, emu.symbols, { top });
+    return result(`Frames ${f0 + 1}-${await emu.frameNum()}: ${samples.length} samples every ${interval} cycles${full ? ' (buffer full: later frames not sampled)' : ''}; ~${t.idlePct.toFixed(0)}% waiting (VSync/BIOS).\n${t.text}`, { samples: samples.length, idlePct: Math.round(t.idlePct) });
+  });
+
+  tool('spu', {
+    description: 'Sound chip: the 24 voices (playing, ADSR phase, envelope, pitch in Hz, volume, sample address) and SPUCNT; export: decode the ADPCM sample at an SPU RAM address (or a voice\'s) to .wav.',
+    inputSchema: {
+      export: z.string().optional().describe('.wav path to write the sample to'),
+      voice: z.number().int().min(0).max(23).optional().describe('export: this voice\'s sample'),
+      address: z.number().int().min(0).max(0x7fff0).optional().describe('export: SPU RAM byte address'),
+      all: z.boolean().default(false).describe('list silent voices too'),
+    },
+    annotations: RO,
+  }, async (a) => {
+    const s = await emu.spuState();
+    const hz = (p) => Math.round(p * 44100 / 4096);
+    if (a.export) {
+      const start = a.address ?? (a.voice !== undefined ? s.voices[a.voice].loop : null);
+      if (start === null || start === undefined) throw new Error('give `voice` or `address`');
+      // Read blocks until an end flag (bit 0 of the flags byte), at most 256 KB.
+      const ram = await emu.spuRead(0, 0x80000);
+      let end = start & ~15;
+      while (end + 16 <= ram.length && end - start < 0x40000) { const fl = ram[end + 1]; end += 16; if (fl & 1) break; }
+      const pcm = Int16Array.from(decodeAdpcm(ram.subarray(start & ~15, end)));
+      const rate = a.voice !== undefined && s.voices[a.voice].pitch ? hz(s.voices[a.voice].pitch) : 22050;
+      const out = await writePath(a.export);
+      await mkdir(path.dirname(out), { recursive: true });
+      await writeFile(out, encodeWav16(pcm, rate));
+      return result(`Wrote ${out}: ${pcm.length} samples from SPU RAM 0x${(start & ~15).toString(16)}-0x${end.toString(16)} at ${rate} Hz.`);
+    }
+    const lines = [`SPUCNT 0x${s.ctrl.toString(16)}${s.ctrl & 0x8000 ? '' : ' (SPU OFF)'}${s.ctrl & 0x4000 ? '' : ' (muted)'}; playing voices ${s.audible.toString(2).split('').reverse().map((b, i) => b === '1' ? i : null).filter((x) => x !== null).join(',') || 'none'}${s.irqAddr !== null && s.ctrl & 0x40 ? `; IRQ at 0x${s.irqAddr.toString(16)}` : ''}`];
+    for (const v of s.voices) {
+      const on = (s.audible >>> v.voice) & 1;
+      if (!on && !a.all) continue;
+      lines.push(`v${v.voice} ${on ? 'on ' : 'off'} ${v.adsr.padEnd(7)} env ${Math.round(Math.max(0, v.envelope) / 0x7fffffff * 100)}% ${hz(v.pitch)} Hz (0x${v.pitch.toString(16)}) vol ${v.volL},${v.volR} at 0x${v.current.toString(16)} loop 0x${v.loop.toString(16)}${v.noise ? ' noise' : ''}${v.reverb ? ' reverb' : ''}${v.fmod ? ' fmod' : ''}`);
+    }
+    return result(`Frame ${await emu.frameNum()}: ${lines.join('\n')}`, { playing: s.audible });
+  });
+
+  tool('cdrom', {
+    description: 'Run frames logging the CD-ROM drive: commands (with the calling function), answers, errors and sector reads mapped to disc files. For load-time and loading-hang bugs.',
+    inputSchema: { frames: z.number().int().min(1).max(3600).default(120), lines: z.number().int().min(1).max(500).default(80) },
+  }, async ({ frames, lines }) => {
+    const log = await emu.cdLog(frames);
+    record({ wait: frames });
+    let files = [];
+    if (romPath && /\.(cue|bin|iso|img)$/i.test(romPath)) { try { files = isoList(await dataTrack(romPath)); } catch {} }
+    const cpf = emu.options.region === 'pal' ? 677376 : 564480;
+    const sum = summarizeCd(log.entries, { files, name: (a) => emu.symbols?.nameOf(a) ?? null, cyclesPerFrame: cpf, limit: lines });
+    const head = `Frames ${log.from + 1}-${log.to}: ${sum.commands} command(s), ${sum.sectors} sector(s) read, ${sum.seeks} seek(s)${sum.errors ? `, ${sum.errors} ERROR(S)` : ''}${log.overflow ? ' (log overflowed)' : ''}.${sum.filesRead ? `\nSectors read from: ${sum.filesRead}.` : ''}`;
+    return result(`${head}${sum.text ? '\n' + sum.text : '\nThe drive was idle.'}`, { commands: sum.commands, sectors: sum.sectors, errors: sum.errors });
   });
 
   tool('gpu_capture', {
@@ -997,7 +1115,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
     try {
       let ex = null;
       for (let i = 0; i < frames; i++) {
-        const cap = emu.live ? await emu.captureFrame(1, { startEx: ex }) : (await emu.waitFrames(1), null);
+        const cap = emu.live ? await emu.captureFrame(1, { startEx: ex, cd: true }) : (await emu.waitFrames(1), null);
         ex = cap?.ex ?? null;
         const { cpu, regions } = await emu.readLight();
         checker.observe({ regions, cpu, cap,

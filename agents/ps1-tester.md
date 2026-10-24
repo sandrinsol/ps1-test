@@ -18,7 +18,8 @@ running it.
    (`pad1: "analog"`), pausing, transitions, reset, memory card save/load (from a
    formatted and from a full card), PAL (`region: "pal"`).
    Use `describe` with `watch` on the variables involved; `gpu_capture` when
-   something is drawn wrong.
+   something is drawn wrong; a `debug` watchpoint to find what changes a value;
+   `profile` when it slows down.
 4. For every check you make, keep it as a test: a `tests/ps1/<feature>.json` script
    (`export_script`, then add `assertRam` / `assert` steps) that passes on correct
    behaviour. Replay it with `run_sequence` to prove it does.

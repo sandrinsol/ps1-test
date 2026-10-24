@@ -57,5 +57,8 @@ interrupts, DMA, timers, SPU, CD, pads, memory cards) and
   also names the bad address and the function.
 - `gpu_capture`: GP0 commands per frame with the drawing environment (E1-E6 words),
   primitive kind, vertices, texture page/CLUT; `src` says CPU write or DMA.
+- `debug` stops on an instruction (breakpoint) or a load/store (watchpoint) and
+  shows the disassembly, registers and a probable call stack; `profile` gives
+  time per function; `spu` the voices; `cdrom` the drive's commands and answers.
 - `read_memory` reads RAM, the scratchpad, I/O registers (`0x1F801070` …) and the
   BIOS live; VRAM is read with `view_vram` (or `texture`), SPU RAM is in save states.

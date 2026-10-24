@@ -38,15 +38,17 @@ const hex2 = (b) => b.toString(16).padStart(2, '0');
 const STATUS = (s) => [s & 1 ? 'error' : '', s & 2 ? 'motor' : '', s & 4 ? 'seek-error' : '', s & 0x10 ? 'lid-open' : '',
   s & 0x20 ? 'reading' : '', s & 0x40 ? 'seeking' : '', s & 0x80 ? 'playing' : ''].filter(Boolean).join(',') || 'idle';
 
-/** Which file holds sector `lba` (files from disc.mjs isoList). */
+/** Which file (or directory, or file-system structure) holds sector `lba`
+ *  (entries from disc.mjs isoList). */
 export function fileAt(files, lba) {
-  for (const f of files) if (!f.dir && lba >= f.lba && lba < f.lba + Math.max(1, Math.ceil(f.size / 2048))) return f;
+  for (const f of files) if (lba >= f.lba && lba < f.lba + Math.max(1, Math.ceil(f.size / 2048))) return f.dir && !f.path.endsWith(')') ? { ...f, path: f.path + '/ (directory)' } : f;
   return null;
 }
 
 /**
- * Readable summary: one line per command (with its answers), sector reads folded
- * into runs with the file they belong to, and totals.
+ * Readable summary: one line per command with the drive's answers appended
+ * ("→ ack", "→ done", "→ ERROR …"), sector reads folded into runs with the file
+ * they belong to, and totals (including which files were read).
  * @param {ReturnType<typeof decodeCdLog>} entries
  * @param {{ files?: { path: string, lba: number, size: number, dir: boolean }[],
  *   name?: (addr: number) => string | null, cyclesPerFrame?: number, limit?: number }} [opts]
@@ -54,6 +56,8 @@ export function fileAt(files, lba) {
 export function summarizeCd(entries, { files = [], name = () => null, cyclesPerFrame = 564480, limit = 80 } = {}) {
   const lines = [], t0 = entries[0]?.cycle ?? 0;
   const when = (c) => `+${(((c - t0) >>> 0) / cyclesPerFrame).toFixed(1)}f`;
+  const lineOf = new Map();    // command id -> index of its line
+  const read = new Map();      // file path -> sectors read
   let run = null, sectors = 0, errors = 0, commands = 0, seeks = 0;
   const flush = () => {
     if (!run) return;
@@ -65,31 +69,44 @@ export function summarizeCd(entries, { files = [], name = () => null, cyclesPerF
   for (const e of entries) {
     if (e.type === 'read') {
       sectors++;
+      const f = fileAt(files, e.lba);
+      const key = f ? f.path : 'other sectors';
+      read.set(key, (read.get(key) ?? 0) + 1);
       if (run && e.lba === run.to + 1) { run.to = e.lba; run.n++; continue; }
       flush();
       run = { from: e.lba, to: e.lba, n: 1, when: when(e.cycle), msf: e.msf.map(pad).join(':') };
       continue;
     }
-    flush();
     if (e.type === 'command') {
+      flush();
       commands++;
       if (e.name === 'Setloc' || e.name === 'SeekL' || e.name === 'SeekP') seeks++;
       let p = e.params.map(hex2).join(' ');
       if (e.name === 'Setloc' && e.params.length === 3) {
         const lba = msfToLba(bcd(e.params[0]), bcd(e.params[1]), bcd(e.params[2]));
         const f = fileAt(files, lba);
-        p = `${e.params.map(hex2).join(':')} = sector ${lba}${f ? ` (${f.path}${lba > f.lba ? ` +${lba - f.lba}` : ''})` : ''}`;
+        const at = f ? `${f.path}${lba > f.lba ? ` +${lba - f.lba}` : ''}` : '';
+        p = `${e.params.map(hex2).join(':')} = sector ${lba}${at ? (at.startsWith('(') ? ` ${at}` : ` (${at})`) : ''}`;
       }
       const fn = name(e.pc);
-      lines.push(`${when(e.cycle)} ${e.name}${p ? ' ' + p : ''}${fn ? `  [from ${fn}]` : ''}`);
+      lineOf.set(e.cmd, lines.length);
+      lines.push(`${when(e.cycle)} ${e.name}${p ? ' ' + p : ''}${fn ? `  [${fn}]` : ''}`);
     } else if (e.type === 'irq') {
-      if (e.irq === 5) errors++;
       if (e.irq === 1) continue;   // one per sector: the reads say it
-      const st = e.result.length ? ` stat ${hex2(e.result[0])} (${STATUS(e.result[0])})${e.result.length > 1 ? ' ' + e.result.slice(1).map(hex2).join(' ') : ''}` : '';
-      lines.push(`${when(e.cycle)}   → ${e.name}${st}`);
+      const stat = e.result[0] ?? 0;
+      let note;
+      if (e.irq === 5) { errors++; note = `ERROR stat ${hex2(stat)} (${STATUS(stat)})${e.result.length > 1 ? ' code ' + hex2(e.result[1]) : ''}`; }
+      else if (e.irq === 3) note = 'ack';
+      else if (e.irq === 2) note = 'done';
+      else note = e.name;
+      if (stat & 0x15 && e.irq !== 5) note += ` (${STATUS(stat)})`;
+      const i = lineOf.get(e.cmd & 0xff);
+      if (i !== undefined && e.irq !== 5) lines[i] += ` → ${note}`;
+      else { flush(); lines.push(`${when(e.cycle)}   → ${note}`); }
     }
   }
   flush();
   const shown = lines.length > limit ? [...lines.slice(0, limit), `… ${lines.length - limit} more line(s)`] : lines;
-  return { text: shown.join('\n'), commands, sectors, seeks, errors };
+  const filesRead = [...read].map(([f, n]) => `${f} (${n})`).join(', ');
+  return { text: shown.join('\n'), commands, sectors, seeks, errors, filesRead };
 }

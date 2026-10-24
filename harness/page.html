@@ -597,7 +597,7 @@
     Emu.logRead = () => {
       if (!Emu.hasInstrumentation()) return null;
       const ptr = M()._ps1test_log_buf(), n = M()._ps1test_log_len();
-      return { words: u8ToB64(M().HEAPU8.subarray(ptr, ptr + n * 4)), overflow: !!(M()._ps1test_log_flags() & 2) };
+      return { words: u8ToB64(M().HEAPU8.subarray(ptr, ptr + n * 4)), overflow: !!(M()._ps1test_log_flags() & 0x100) };
     };
     /** The CPU-register and GPU blocks of a save state, cut out in the page so a
      *  per-frame check needn't move the whole 4 MB state: { regs, gpu } base64. */
@@ -650,7 +650,7 @@
     Emu.dbgOff = () => {
       if (!Emu.hasDebugger()) return;
       const b = dbgBlock();
-      b[DBG.FLAGS] = 0; b[DBG.HALTED] = 0; b[DBG.IDLE] = 0; b[DBG.SKIP] = 1;
+      b[DBG.FLAGS] = 0; b[DBG.HALTED] = 0; b[DBG.IDLE] = 0; b[DBG.SKIP] = 1; b[DBG.NHITS] = 0; b[DBG.TOTAL] = 0;
       Emu._dbgActive = false; Emu._partial = false;
     };
     const dbgHalted = () => Emu._dbgActive && dbgBlock()[DBG.HALTED] === 1;

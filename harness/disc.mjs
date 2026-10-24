@@ -292,7 +292,8 @@ export function isoFile(img, name) {
 }
 
 /** Every file and directory of a disc's ISO9660 file system:
- *  [{ path, lba, size, dir }] (sectors from the start of the data track). */
+ *  [{ path, lba, size, dir }] (sectors from the start of the data track), plus
+ *  the volume descriptor, path tables and root directory (system: true). */
 export function isoList(img) {
   const sec = sectorReader(img);
   const pvd = sec(16);
@@ -316,7 +317,14 @@ export function isoList(img) {
       }
     }
   };
-  walk(pvd.readUInt32LE(156 + 2), pvd.readUInt32LE(156 + 10), '/');
+  const root = pvd.readUInt32LE(156 + 2);
+  walk(root, pvd.readUInt32LE(156 + 10), '/');
+  // The file system's own sectors, so reads of them can be named too.
+  const ptSize = pvd.readUInt32LE(132);
+  out.push({ path: '(volume descriptor)', lba: 16, size: 2048, dir: false, system: true },
+    { path: '(path table)', lba: pvd.readUInt32LE(140), size: ptSize, dir: false, system: true },
+    { path: '(path table, big-endian)', lba: pvd.readUInt32BE(148), size: ptSize, dir: false, system: true },
+    { path: '/ (root directory)', lba: root, size: pvd.readUInt32LE(156 + 10), dir: true, system: true });
   return out;
 }
 
