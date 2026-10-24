@@ -10,7 +10,7 @@
 
 import path from 'node:path';
 import { ok, done, HARNESS } from './lib.mjs';
-import { startServer } from '../driver.mjs';
+import { startServer, BROWSER_ARGS } from '../driver.mjs';
 import { decodePng } from '../png.mjs';
 
 const { chromium } = await import('playwright');
@@ -24,7 +24,7 @@ if (!base) {
 const bypass = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 const browser = await chromium.launch({
   executablePath: process.env.PS1TEST_CHROMIUM || undefined,
-  args: ['--use-gl=angle', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--enable-webgl', '--mute-audio'],
+  args: ['--use-gl=angle', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--enable-webgl', '--mute-audio', ...BROWSER_ARGS],
 });
 try {
   const context = await browser.newContext({
