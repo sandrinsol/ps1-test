@@ -9,6 +9,7 @@ const DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'te
 
 export const TEMPLATES = {
   psn00bsdk: 'PlayStation, C with PSn00bSDK (CMake): text, a player sprite, a GTE cube, a disc image',
+  'psn00bsdk-cpp': 'PlayStation, C++ with PSn00bSDK (CMake): the same game in classes',
 };
 
 /** Copy template `name` into `dest` (which must not exist or be empty).

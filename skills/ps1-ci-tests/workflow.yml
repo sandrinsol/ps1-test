@@ -26,7 +26,7 @@ jobs:
       - name: Install the MIPS toolchain and PSn00bSDK
         run: |
           if [ "${{ steps.sdk.outputs.cache-hit }}" = true ]; then
-            sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu binutils-mipsel-linux-gnu ninja-build
+            sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu g++-mipsel-linux-gnu binutils-mipsel-linux-gnu ninja-build
           else
             sudo .devcontainer/install-psn00bsdk.sh /opt/psn00bsdk
           fi
