@@ -1,5 +1,311 @@
+diff --git a/frontend/libretro.c b/frontend/libretro.c
+index 407253e3..88828314 100644
+--- a/frontend/libretro.c
++++ b/frontend/libretro.c
+@@ -726,6 +726,9 @@ struct rearmed_cbs pl_rearmed_cbs = {
+    .gpu_frame_count  = &frame_counter,
+ };
+ 
++int ps1test_dbg_halted(void);
++void ps1test_dbg_idle(void);
++
+ void pl_frame_limit(void)
+ {
+    /* called once per frame, make psxCpu->Execute() above return */
+@@ -3363,8 +3366,13 @@ void retro_run(void)
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+       update_variables(true);
+ 
+-   psxRegs.stop = 0;
+-   psxCpu->Execute(&psxRegs);
++   /* ps1-test: while the debugger is halted at a hit, the CPU doesn't run */
++   if (ps1test_dbg_halted())
++      ps1test_dbg_idle();
++   else {
++      psxRegs.stop = 0;
++      psxCpu->Execute(&psxRegs);
++   }
+ 
+    if (pl_rearmed_cbs.fskip_dirty == 1) {
+       if (frameskip_counter < frameskip_interval)
+diff --git a/libpcsxcore/cdrom.c b/libpcsxcore/cdrom.c
+index 50255c80..29d6fff3 100644
+--- a/libpcsxcore/cdrom.c
++++ b/libpcsxcore/cdrom.c
+@@ -292,11 +292,19 @@ static unsigned int msf2sec(const u8 *msf) {
+ 	SetResultSize_(size); \
+ }
+ 
++void ps1test_log_cd(u32 type, u32 cycle, const u32 *w, int n);
++
+ static void setIrq(u8 irq, int log_cmd)
+ {
+ 	u8 old = cdr.IrqStat & cdr.IrqMask ? 1 : 0;
+ 	u8 new_ = irq & cdr.IrqMask ? 1 : 0;
+ 
++	if (irq) {
++		u32 w[5] = { irq | ((log_cmd & 0xffff) << 8) | ((u32)cdr.ResultC << 24) };
++		memcpy(&w[1], cdr.Result, cdr.ResultC < 16 ? cdr.ResultC : 16);
++		ps1test_log_cd(6, psxRegs.cycle, w, 5);
++	}
++
+ 	cdr.IrqStat = irq;
+ 	if ((old ^ new_) & new_)
+ 		psxHu32ref(0x1070) |= SWAP32((u32)0x4);
+@@ -478,6 +486,10 @@ static int ReadTrack(const u8 *time)
+ 	if (memcmp(cdr.Prev, time, 3) == 0)
+ 		return 1;
+ 
++	{
++		u32 w = time[0] | (time[1] << 8) | (time[2] << 16);
++		ps1test_log_cd(7, psxRegs.cycle, &w, 1);
++	}
+ 	ret = cdra_readTrack(time);
+ 	if (ret == 0)
+ 		memcpy(cdr.Prev, time, 3);
+@@ -1523,6 +1535,13 @@ void cdrWrite1(unsigned char rt) {
+ 	SysPrintf(" @%08x\n", psxRegs.pc);
+ #endif
+ 
++	{
++		u32 w[6] = { rt | ((u32)cdr.ParamC << 8) };
++		memcpy(&w[1], cdr.Param, cdr.ParamC < 8 ? cdr.ParamC : 8);
++		w[5] = psxRegs.pc;
++		ps1test_log_cd(5, psxRegs.cycle, w, 6);
++	}
++
+ 	cdr.ResultReady = 0;
+ 	cdr.Ctrl |= 0x80;
+ 
+diff --git a/libpcsxcore/psxinterpreter.c b/libpcsxcore/psxinterpreter.c
+index 68d79321..d3f0f54e 100644
+--- a/libpcsxcore/psxinterpreter.c
++++ b/libpcsxcore/psxinterpreter.c
+@@ -236,6 +236,173 @@ static u32 INT_ATTR fetchICache(psxRegisters *regs, u8 **memRLUT, u32 pc)
+ 
+ static u32 (INT_ATTR *fetch)(psxRegisters *regs_, u8 **memRLUT, u32 pc) = fetchNoCache;
+ 
++/* ---- ps1-test debugger ----
++ * Breakpoints, watchpoints, single-stepping and a PC-sampling profiler for the
++ * ps1-test harness, driven through a block of words that JS reads and writes
++ * (ps1test_dbg_block). Only active with precise exceptions (execIbp, checkLD/ST),
++ * which the harness always enables. Word offsets: */
++#ifndef EMSCRIPTEN_KEEPALIVE
++#define EMSCRIPTEN_KEEPALIVE
++#endif
++enum {
++	DBG_FLAGS = 0,      /* 1 exec breakpoints, 2 watchpoints, 4 profiler, 8 halt on a hit */
++	DBG_HALTED = 1,     /* 1 while halted at a hit (retro_run then skips the CPU) */
++	DBG_IDLE = 2,       /* retro_run calls skipped while halted */
++	DBG_SKIP = 3,       /* don't stop on this pc once (resuming from it) */
++	DBG_NEXEC = 4, DBG_EXEC = 5,              /* up to 16 addresses */
++	DBG_NWATCH = 21, DBG_WATCH = 22,          /* 16 x { start, end, mode, op, value } */
++	DBG_NHITS = 102, DBG_TOTAL = 103, DBG_MAXHITS = 104,
++	DBG_PROF_INTERVAL = 105, DBG_PROF_N = 106, DBG_PROF_NEXT = 107,
++	DBG_REGS = 108,     /* r0-r31, lo, hi, pc, sr, cause, epc, badvaddr, cycle */
++	DBG_HIT0 = 160,     /* 256 x 16 words: kind, pc, addr, size, value, old, ra, sp,
++	                       cycle, watch/breakpoint index, v0, a0, a1, a2, a3, code */
++	DBG_WORDS = 160 + 256 * 16
++};
++#define PS1TEST_PROF_WORDS (1 << 20)
++static u32 ps1test_dbg[DBG_WORDS] = { [DBG_SKIP] = 1 };
++static u32 ps1test_prof[PS1TEST_PROF_WORDS];
++
++EMSCRIPTEN_KEEPALIVE u32 *ps1test_dbg_block(void) { return ps1test_dbg; }
++EMSCRIPTEN_KEEPALIVE u32 *ps1test_prof_buf(void) { return ps1test_prof; }
++int ps1test_dbg_halted(void) { return ps1test_dbg[DBG_HALTED]; }
++void ps1test_dbg_idle(void) { ps1test_dbg[DBG_IDLE]++; }
++
++static u32 ps1test_norm(u32 a)
++{
++	a &= 0x1fffffff;
++	return a < 0x800000 ? a & 0x1fffff : a;
++}
++
++/* Current value at a RAM/scratchpad address (0 elsewhere: no I/O side effects). */
++static u32 ps1test_peek(u32 addr, u32 size)
++{
++	u32 a = ps1test_norm(addr), v = 0, i;
++	const u8 *p;
++	if (a < 0x200000) p = (const u8 *)psxM + a;
++	else if (a >= 0x1f800000 && a < 0x1f800400) p = (const u8 *)psxH + (a & 0x3ff);
++	else return 0;
++	for (i = 0; i < size; i++) v |= (u32)p[i] << (i * 8);
++	return v;
++}
++
++static void ps1test_hit(psxRegisters *regs, u32 kind, u32 pc, u32 addr, u32 size,
++	u32 value, u32 old, u32 index)
++{
++	u32 n = ps1test_dbg[DBG_NHITS];
++	ps1test_dbg[DBG_TOTAL]++;
++	if (n < ps1test_dbg[DBG_MAXHITS] && n < 256) {
++		u32 *h = ps1test_dbg + DBG_HIT0 + n * 16;
++		h[0] = kind; h[1] = pc; h[2] = addr; h[3] = size; h[4] = value; h[5] = old;
++		h[6] = regs->GPR.n.ra; h[7] = regs->GPR.n.sp; h[8] = regs->cycle; h[9] = index;
++		h[10] = regs->GPR.n.v0; h[11] = regs->GPR.n.a0; h[12] = regs->GPR.n.a1;
++		h[13] = regs->GPR.n.a2; h[14] = regs->GPR.n.a3; h[15] = regs->code;
++		ps1test_dbg[DBG_NHITS] = n + 1;
++	}
++	if (ps1test_dbg[DBG_FLAGS] & 8) {
++		ps1test_dbg[DBG_HALTED] = 1;
++		regs->stop = 1;
++	}
++}
++
++static int ps1test_cond(u32 op, u32 v, u32 want)
++{
++	switch (op) {
++	case 1: return v == want;
++	case 2: return v != want;
++	case 3: return v < want;
++	case 4: return v > want;
++	case 5: return v <= want;
++	case 6: return v >= want;
++	}
++	return 1;
++}
++
++/* Before an instruction runs: profiler sample, then exec breakpoints.
++ * Returns 1 to halt before executing it. */
++static int ps1test_exec_hook(psxRegisters *regs, u32 pc)
++{
++	u32 flags = ps1test_dbg[DBG_FLAGS], i;
++	if (flags & 4) {
++		if ((s32)(regs->cycle - ps1test_dbg[DBG_PROF_NEXT]) >= 0) {
++			u32 n = ps1test_dbg[DBG_PROF_N];
++			if (n < PS1TEST_PROF_WORDS) {
++				ps1test_prof[n] = pc;
++				ps1test_dbg[DBG_PROF_N] = n + 1;
++			}
++			ps1test_dbg[DBG_PROF_NEXT] = regs->cycle + ps1test_dbg[DBG_PROF_INTERVAL];
++		}
++	}
++	if (!(flags & 1))
++		return 0;
++	if (pc == ps1test_dbg[DBG_SKIP]) {
++		ps1test_dbg[DBG_SKIP] = 1;
++		return 0;
++	}
++	for (i = 0; i < ps1test_dbg[DBG_NEXEC] && i < 16; i++) {
++		if (ps1test_dbg[DBG_EXEC + i] == pc) {
++			ps1test_hit(regs, 1, pc, pc, 4, intFakeFetch(pc), 0, i);
++			if (ps1test_dbg[DBG_HALTED]) {
++				ps1test_dbg[DBG_SKIP] = pc;
++				return 1;
++			}
++		}
++	}
++	return 0;
++}
++
++/* Before a load or store (regs->code is the instruction). */
++static void ps1test_mem_hook(psxRegisters *regs, u32 addr, int store)
++{
++	u32 code = regs->code, op = code >> 26, size, a, i, value = 0, old;
++	switch (op & 7) {
++	case 0: case 4: size = 1; break;   /* lb sb lbu */
++	case 1: case 5: size = 2; break;   /* lh sh lhu */
++	default: size = 4; addr &= ~3; break;
++	}
++	a = ps1test_norm(addr);
++	old = ps1test_peek(addr, size);
++	if (store) {
++		if (op != 0x3a)   /* swc2: a GTE register, not a GPR */
++			value = regs->GPR.r[(code >> 16) & 31];
++		if (size < 4) value &= (1u << (size * 8)) - 1;
++	} else
++		value = old;
++	for (i = 0; i < ps1test_dbg[DBG_NWATCH] && i < 16; i++) {
++		const u32 *w = ps1test_dbg + DBG_WATCH + i * 5;
++		u32 mode = w[2];
++		if (a + size <= w[0] || a >= w[1])
++			continue;
++		if (!(mode & (store ? 2 : 1)))
++			continue;
++		if (store && (mode & 4) && value == old)
++			continue;
++		if (!ps1test_cond(w[3], value, w[4]))
++			continue;
++		ps1test_hit(regs, store ? 4 : 2, regs->pc - 4, addr, size, value, old, i);
++		ps1test_dbg[DBG_SKIP] = 1;
++		break;
++	}
++}
++
++/* Registers into DBG_REGS (with a pending delayed load shown as done). */
++EMSCRIPTEN_KEEPALIVE void ps1test_regs(void)
++{
++	u32 *r = ps1test_dbg + DBG_REGS;
++	int i;
++	for (i = 0; i < 34; i++)
++		r[i] = psxRegs.GPR.r[i];
++	for (i = 0; i < 2; i++)
++		if (psxRegs.dloadReg[i])
++			r[psxRegs.dloadReg[i]] = psxRegs.dloadVal[i];
++	r[0] = 0;
++	r[34] = psxRegs.pc;
++	r[35] = psxRegs.CP0.n.SR;
++	r[36] = psxRegs.CP0.n.Cause;
++	r[37] = psxRegs.CP0.n.EPC;
++	r[38] = psxRegs.CP0.n.BadVAddr;
++	r[39] = psxRegs.cycle;
++}
++
+ // Make the timing events trigger faster as we are currently assuming everything
+ // takes one cycle, which is not the case on real hardware.
+ // FIXME: count cache misses, memory latencies, stalls to get rid of this
+@@ -741,6 +908,8 @@ OP(psxJALRe) {
+ // exception checking order is important
+ static inline int checkLD(psxRegisters *regs, u32 addr, u32 m) {
+ 	int bpException = 0;
++	if (unlikely(ps1test_dbg[DBG_FLAGS] & 2))
++		ps1test_mem_hook(regs, addr, 0);
+ 	if (unlikely(DBR_EN_LD(regs->CP0.n.DCIC, addr) &&
+ 	    ((addr ^ regs->CP0.n.BDA) & regs->CP0.n.BDAM) == 0)) {
+ 		regs->CP0.n.DCIC |= 0x0d;
+@@ -766,6 +935,8 @@ static inline int checkLD(psxRegisters *regs, u32 addr, u32 m) {
+ 
+ static inline int checkST(psxRegisters *regs, u32 addr, u32 m) {
+ 	int bpException = 0;
++	if (unlikely(ps1test_dbg[DBG_FLAGS] & 2))
++		ps1test_mem_hook(regs, addr, 1);
+ 	if (unlikely(DBR_EN_ST(regs->CP0.n.DCIC, addr) &&
+ 	    ((addr ^ regs->CP0.n.BDA) & regs->CP0.n.BDAM) == 0)) {
+ 		regs->CP0.n.DCIC |= 0x15;
+@@ -1193,6 +1364,9 @@ static inline void execI_(u8 **memRLUT, psxRegisters *regs) {
+ static inline void execIbp(u8 **memRLUT, psxRegisters *regs) {
+ 	u32 pc = regs->pc;
+ 
++	if (unlikely(ps1test_dbg[DBG_FLAGS] & 5) && ps1test_exec_hook(regs, pc))
++		return;
++
+ 	addCycle(regs);
+ 	dloadStep(regs);
+ 
+@@ -1218,6 +1392,20 @@ static void intExecuteBp(psxRegisters *regs) {
+ 		execIbp(memRLUT, regs);
+ }
+ 
++/* ps1-test: run up to n instructions while halted (stops early on a hit).
++ * Returns how many ran. */
++EMSCRIPTEN_KEEPALIVE int ps1test_step(int n)
++{
++	u8 **memRLUT = psxMemRLUT;
++	int i;
++	ps1test_dbg[DBG_HALTED] = 0;
++	for (i = 0; i < n && !ps1test_dbg[DBG_HALTED]; i++)
++		execIbp(memRLUT, &psxRegs);
++	ps1test_dbg[DBG_HALTED] = 1;
++	ps1test_regs();
++	return i;
++}
++
+ static void intExecuteBlock(psxRegisters *regs, enum blockExecCaller caller) {
+ 	u8 **memRLUT = psxMemRLUT;
+ 
 diff --git a/libpcsxcore/r3000a.c b/libpcsxcore/r3000a.c
-index cfd1ab0..1d72b66 100644
+index cfd1ab09..1d72b662 100644
 --- a/libpcsxcore/r3000a.c
 +++ b/libpcsxcore/r3000a.c
 @@ -112,8 +112,14 @@ void psxShutdown() {
@@ -17,11 +323,55 @@ index cfd1ab0..1d72b66 100644
  	
  	if (unlikely(!Config.HLE && (opcode >> 25) == 0x25)) {
  		// "hokuto no ken" / "Crash Bandicot 2" ...
+diff --git a/plugins/dfsound/spu.c b/plugins/dfsound/spu.c
+index c14f6469..f5437ad1 100644
+--- a/plugins/dfsound/spu.c
++++ b/plugins/dfsound/spu.c
+@@ -69,6 +69,39 @@ static char * libraryInfo     = N_("P.E.Op.S. Sound Driver V1.7\nCoded by Pete B
+ // globals
+ 
+ SPUInfo         spu;
++
++/* ---- ps1-test: SPU state for the harness ----
++ * ps1test_spu_ptr(0): SPU RAM (512 KB), 1: the register area (0x1F801C00-0x1F801FFF).
++ * ps1test_spu_state(): 8 global words (ctrl, stat, transfer address, audible,
++ * new, dead channel masks, IRQ address, 0) then 24 voices x 8 words (current
++ * and loop offset in SPU RAM, envelope volume, ADSR state | flags << 8 (1 noise,
++ * 2 reverb, 4 frequency modulation), raw pitch, left and right volume, 0). */
++#ifndef EMSCRIPTEN_KEEPALIVE
++#define EMSCRIPTEN_KEEPALIVE
++#endif
++static unsigned int ps1test_spu_words[8 + 24 * 8];
++EMSCRIPTEN_KEEPALIVE void *ps1test_spu_ptr(int which)
++{
++ return which == 0 ? (void *)spu.spuMemC : which == 1 ? (void *)spu.regArea : NULL;
++}
++EMSCRIPTEN_KEEPALIVE unsigned int *ps1test_spu_state(void)
++{
++ unsigned int *w = ps1test_spu_words;
++ int ch;
++ w[0] = spu.spuCtrl; w[1] = spu.spuStat; w[2] = spu.spuAddr;
++ w[3] = spu.dwChannelsAudible; w[4] = spu.dwNewChannel; w[5] = spu.dwChannelDead;
++ w[6] = spu.pSpuIrq ? (unsigned int)(spu.pSpuIrq - spu.spuMemC) : 0xffffffff; w[7] = 0;
++ for (ch = 0; ch < MAXCHAN && spu.s_chan; ch++) {
++  const SPUCHAN *c = &spu.s_chan[ch];
++  unsigned int *v = w + 8 + ch * 8;
++  v[0] = c->pCurr ? (unsigned int)(c->pCurr - spu.spuMemC) : 0;
++  v[1] = c->pLoop ? (unsigned int)(c->pLoop - spu.spuMemC) : 0;
++  v[2] = c->ADSRX.EnvelopeVol;
++  v[3] = c->ADSRX.State | ((c->bNoise | (c->bReverb << 1) | ((c->bFMod != 0) << 2)) << 8);
++  v[4] = c->iRawPitch; v[5] = c->iLeftVolume; v[6] = c->iRightVolume; v[7] = 0;
++ }
++ return w;
++}
+ SPUConfig       spu_config;
+ 
+ static int iFMod[NSSIZE];
 diff --git a/plugins/gpulib/gpu.c b/plugins/gpulib/gpu.c
-index e82cc0e..3ceac8c 100644
+index e82cc0e6..b3b1fd57 100644
 --- a/plugins/gpulib/gpu.c
 +++ b/plugins/gpulib/gpu.c
-@@ -28,6 +28,71 @@
+@@ -28,6 +28,84 @@
  
  struct psx_gpu gpu;
  
@@ -31,7 +381,9 @@ index e82cc0e..3ceac8c 100644
 + * exceptions. The harness turns it on for one frame and reads it back from JS.
 + * Entry: header word (type << 28 | source << 24 | word count), an address word,
 + * then the words. Types: 1 GP0 (source 0 CPU, 1 DMA block, 2 DMA chain),
-+ * 2 GP1, 3 chain start, 4 CPU exception (cause, EPC, BadVaddr). */
++ * 2 GP1, 3 chain start, 4 CPU exception (cause, EPC, BadVaddr); 5-7 CD-ROM
++ * (below). ps1test_log_ctl's argument picks what to log: bit 0 GPU and
++ * exceptions, bit 1 CD-ROM. */
 +#ifndef EMSCRIPTEN_KEEPALIVE
 +#define EMSCRIPTEN_KEEPALIVE
 +#endif
@@ -40,9 +392,9 @@ index e82cc0e..3ceac8c 100644
 +static int ps1test_log_used, ps1test_log_on, ps1test_log_overflow;
 +extern signed char *psxM, *psxH, *psxR;
 +
-+static void ps1test_put(uint32_t type, uint32_t src, uint32_t addr, const uint32_t *w, int n)
++static void ps1test_put_m(int mask, uint32_t type, uint32_t src, uint32_t addr, const uint32_t *w, int n)
 +{
-+  if (!ps1test_log_on)
++  if (!(ps1test_log_on & mask))
 +    return;
 +  if (ps1test_log_used + 2 + n > PS1TEST_LOG_WORDS) {
 +    ps1test_log_overflow = 1;
@@ -61,6 +413,17 @@ index e82cc0e..3ceac8c 100644
 +  if (psxM && c >= psxM && c < psxM + 0x200000)
 +    return 0x80000000u | (uint32_t)(c - psxM);
 +  return 0;
++}
++
++#define ps1test_put(...) ps1test_put_m(1, __VA_ARGS__)
++
++/* CD-ROM entries (logged when bit 1 of the log mode is set); the address word
++ * is the CPU cycle count. 5 command: cmd | params << 8, then the parameter
++ * bytes (4 words) and the pc; 6 interrupt: irq | cmd << 8 | results << 24, then
++ * the result bytes (4 words); 7 sector read: minute | second << 8 | frame << 16. */
++void ps1test_log_cd(uint32_t type, uint32_t cycle, const uint32_t *w, int n)
++{
++  ps1test_put_m(2, type, 0, cycle, w, n);
 +}
 +
 +void ps1test_log_exception(uint32_t cause, uint32_t epc, uint32_t badvaddr)
@@ -93,7 +456,7 @@ index e82cc0e..3ceac8c 100644
  static noinline int do_cmd_buffer(struct psx_gpu *gpu, uint32_t *data, int count,
      int *cycles_sum, int *cycles_last);
  static noinline void finish_vram_transfer(struct psx_gpu *gpu, int is_read);
-@@ -310,6 +375,7 @@ long GPUshutdown(void)
+@@ -310,6 +388,7 @@ long GPUshutdown(void)
  void GPUwriteStatus(uint32_t data)
  {
    uint32_t cmd = data >> 24;
@@ -101,7 +464,7 @@ index e82cc0e..3ceac8c 100644
    uint32_t fb_dirty = 1;
    int src_x, src_y;
  
-@@ -772,6 +838,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
+@@ -772,6 +851,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
    if (unlikely(gpu.cmd_len > 0))
      flush_cmd_buffer(&gpu);
  
@@ -109,7 +472,7 @@ index e82cc0e..3ceac8c 100644
    left = do_cmd_buffer(&gpu, mem, count, &dummy, &dummy);
    if (left)
      log_anomaly(&gpu, "GPUwriteDataMem: discarded %d/%d words\n", left, count);
-@@ -780,6 +847,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
+@@ -780,6 +860,7 @@ void GPUwriteDataMem(uint32_t *mem, int count)
  void GPUwriteData(uint32_t data)
  {
    log_io(&gpu, "gpu_write %08x\n", data);
@@ -117,7 +480,7 @@ index e82cc0e..3ceac8c 100644
    gpu.cmd_buffer[gpu.cmd_len++] = HTOLE32(data);
    if (gpu.cmd_len >= CMD_BUFFER_LEN)
      flush_cmd_buffer(&gpu);
-@@ -799,6 +867,10 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
+@@ -799,6 +880,10 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
      flush_cmd_buffer(&gpu);
  
    log_io(&gpu, "gpu_dma_chain\n");
@@ -128,7 +491,7 @@ index e82cc0e..3ceac8c 100644
    addr = ld_addr = start_addr & 0xffffff;
    for (count = 0; (addr & 0x800000) == 0; count++)
    {
-@@ -813,6 +885,8 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
+@@ -813,6 +898,8 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr,
  
      log_io(&gpu, ".chain %08lx #%d+%d %u+%u\n",
        (long)(list - rambase) * 4, len, gpu.cmd_len, cpu_cycles_sum, cpu_cycles_last);
