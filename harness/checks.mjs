@@ -73,6 +73,7 @@ export class RunChecker {
     /** @type {Array<number | null>} */ this.counters = [];
     /** @type {boolean[]} */ this.drew = [];
     this.blank = 0; this.displayOff = 0; this.sameScreen = 0; this.lastScreen = null;
+    this.cd = { errors: 0, first: null, last: null, commands: 0, reads: 0 };
     this.gpu = { frames: 0, prims: 0, offArea: 0, tooBig: 0, texFb: new Set(), clutFb: new Set(), emptyClut: new Set(), dmaOutside: 0, unaligned: 0, leftover: 0, noPrims: 0, overflow: 0 };
   }
 
@@ -83,6 +84,15 @@ export class RunChecker {
     this.frames++;
     this.counters.push(counter);
     this.drew.push(!!cap && cap.prims.length > 0);
+    // CD-ROM drive answers, when the capture logged them: INT5 = an error.
+    for (const e of cap?.cd ?? []) {
+      if (e.type === 'command') { this.cd.commands++; this.cd.last = e; }
+      else if (e.type === 'read') this.cd.reads++;
+      else if (e.type === 'irq' && e.irq === 5) {
+        if (!this.cd.errors) this.cd.first = { frame: this.frames, after: this.cd.last, result: e.result };
+        this.cd.errors++;
+      }
+    }
     if (counter !== null) {
       if (this.lastCounter !== null && counter === this.lastCounter) this.lag++;
       this.lastCounter = counter;
@@ -212,6 +222,11 @@ export class RunChecker {
       if (g.leftover) out.push({ level: 'warn', msg: `a GP0 command was left incomplete at the end of ${g.leftover} frame(s) (a packet with the wrong word count?)` });
     }
     if (!this.exceptions.size) out.push({ level: 'ok', msg: 'no CPU exceptions' });
+    if (this.cd.errors) {
+      const f = this.cd.first, by = f.after?.pc ? this.name(f.after.pc) : null;
+      const after = f.after ? ` after ${f.after.name}${by ? ` (from ${by})` : ''}` : '';
+      out.push({ level: 'warn', msg: `the CD-ROM drive reported ${this.cd.errors} error(s) (INT5)${after}, first on frame ${f.frame} of the run (stat ${(f.result[0] ?? 0).toString(16)}, code ${(f.result[1] ?? 0).toString(16)}): a bad seek or read the game must retry; cd_log shows the commands` });
+    } else if (this.cd.commands) out.push({ level: 'ok', msg: `CD-ROM: ${this.cd.commands} command(s), ${this.cd.reads} sector(s) read, no errors` });
     return out;
   }
 }
