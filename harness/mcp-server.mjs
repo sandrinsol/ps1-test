@@ -9,6 +9,7 @@
 //   change   write_memory, state (save/load), memory_card, cheats
 //   test     run_sequence, assert_golden, export_script, ab_compare, record_video
 //   find     ram_search
+//   make     texture (PNG ↔ TIM, into VRAM), background (maps → tileset + map), data (VAG sound, tables, meshes)
 //   develop  build (compile + reload), check (hardware rules), new_project
 // Addresses can be symbol names when there is a symbol file (.elf/.map/.sym).
 // A ps1test.json in the workspace sets project defaults (build, rom, bios, watch).
@@ -42,6 +43,11 @@ import { display } from './psx-memory.mjs';
 import { listSaves, formatCard } from './mcard.mjs';
 import { exeIssues, discIssues, RunChecker } from './checks.mjs';
 import { TEMPLATES, createProject } from './templates.mjs';
+import { convertTim, readTim, timToPng, timToC } from './tim.mjs';
+import { convertTilemap, writeTilemap, renderTiledMap } from './tilemap.mjs';
+import { encodeVag, writeSound, makeTable, writeTable, convertMesh, writeMesh } from './gamedata.mjs';
+import { vramImage, outline } from './gpu.mjs';
+import { encodePng } from './png.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(__dirname, 'out');
@@ -71,7 +77,10 @@ function slimSchema(node) {
     if (k === 'type' && node.enum) continue;
     if (k === 'propertyNames' && v?.type === 'string' && Object.keys(v).length === 1) continue;
     if (k === 'additionalProperties' && v && typeof v === 'object' && !Object.keys(v).length) continue;
-    if (k === 'anyOf' && v.every((x) => Object.keys(x).length === 1 && typeof x.type === 'string')) { out.type = v.map((x) => x.type); continue; }
+    if (k === 'anyOf') {
+      const kids = v.map(slimSchema);
+      if (kids.every((x) => Object.keys(x).length === 1 && typeof x.type === 'string')) { out.type = kids.map((x) => x.type); continue; }
+    }
     out[k] = slimSchema(v);
   }
   return out;
@@ -229,7 +238,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
 
   // ---- Play ----
   tool('load_disc', {
-    description: 'Boot a disc image (.cue/.bin/.iso) or PS-EXE (.exe), fresh. A symbol file beside it (.elf/.map/.sym) lets addresses be names. Paused between calls: reads are frame-exact.',
+    description: 'Boot a disc (.cue/.bin/.iso) or PS-EXE, fresh; a .elf/.map/.sym beside it gives symbols. Paused between calls: reads are frame-exact.',
     inputSchema: {
       path: z.string().optional().describe('default: ps1test.json rom'),
       bios: z.string().optional().describe('openbios (default) | hle | path to a BIOS dump'),
@@ -291,7 +300,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   });
 
   tool('set_analog', {
-    description: 'Tilt an analog stick to x,y (-128..127, 0 = centre, +y down) without advancing time; stays until changed. DualShock games must enable analog mode (most do; or load with pad1:"analog").',
+    description: 'Tilt a stick to x,y (-128..127, +y down); stays until changed. Needs analog mode (pad1:"analog", or the game enables it).',
     inputSchema: { stick: z.enum(['left', 'right']), x: z.number().int().min(-128).max(127).default(0), y: z.number().int().min(-128).max(127).default(0), port: Port },
   }, async ({ stick, x, y, port }) => {
     await emu.setAnalog(stick, x, y, port - 1);
@@ -374,7 +383,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   });
 
   tool('read_cpu', {
-    description: 'R3000A registers (pc named from symbols), COP0 status/cause, and with gte:true the GTE registers. A pc that stays put across waits means a hang.',
+    description: 'R3000A registers (pc named from symbols), COP0 status/cause; gte:true adds GTE registers. A pc stuck across waits (with no progress) is a hang.',
     inputSchema: { gte: z.boolean().default(false) },
     annotations: RO,
   }, async ({ gte }) => {
@@ -392,7 +401,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   });
 
   tool('gpu_capture', {
-    description: 'Run `frames` frame(s) (default 1) logging every GPU command: list the primitives drawn (kind, box, colour, texture page/CLUT, RAM address + symbol of DMA-chain packets) and show the drawn buffer with each outlined. Also reports CPU exceptions in those frames.',
+    description: 'Run frame(s) logging GPU commands: primitives drawn (box, colour, texpage/CLUT, RAM address+symbol of chain packets), CPU exceptions, and the drawn buffer outlined.',
     inputSchema: {
       frames: z.number().int().min(1).max(60).default(1),
       list: z.number().int().min(0).max(500).default(40).describe('primitives to list'),
@@ -424,7 +433,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   });
 
   tool('view_vram', {
-    description: 'VRAM (1024x512, 15-bit view) with the display area (white) and draw area (red) outlined; gpu:true runs a frame and also outlines the texture pages (cyan) and CLUTs (orange) it used. texture: one texture page decoded through a CLUT, as the GPU samples it.',
+    description: 'VRAM 1024x512 with display (white) and draw (red) areas outlined; gpu:true runs a frame and outlines texpages/CLUTs used. what:"texture" decodes one through a CLUT.',
     inputSchema: {
       what: z.enum(['vram', 'texture']).default('vram'),
       gpu: z.boolean().default(false),
@@ -508,7 +517,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   });
 
   tool('cheats', {
-    description: 'Replace the active cheat codes ([] clears): GameShark / Action Replay lines like "80010394 0064". They apply every frame and survive reset.',
+    description: 'Replace the active GameShark/Action Replay codes ([] clears), e.g. "80010394 0064". Applied every frame; survive reset.',
     inputSchema: { codes: z.array(z.string()) },
   }, async ({ codes }) => {
     await emu.setCheats(codes);
@@ -517,7 +526,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   });
 
   tool('memory_card', {
-    description: 'Memory card in slot 1/2. list: the saves (game ID, title, blocks, icon). export / import: a card image (.mcr/.mcd raw 128 KB, .gme, .vgs) at `path`; import resets unless reset:false. format: insert a blank formatted card.',
+    description: 'Card in slot 1/2: list saves (ID, title, icon), export/import an image (.mcr/.mcd/.gme/.vgs; import resets unless reset:false), or format.',
     inputSchema: {
       action: z.enum(['list', 'export', 'import', 'format']),
       path: z.string().optional(), slot: z.number().int().min(1).max(2).default(1), reset: z.boolean().default(true),
@@ -556,11 +565,11 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
 
   // ---- Test ----
   tool('run_sequence', {
-    description: 'Run many steps in one call. Steps, one key each: wait:N | tap:btn or [btns] (hold,release; "P2:CROSS" for port 2) | press/release:btn | hold:btn,frames | analog:left|right,x,y | waitUntil:{address,op,value} or {screen:changed|stable} (maxFrames) | shot:name | record:{frames,every} | saveState/loadState:id | loadStateFile:path | read:addr (as) | write:addr,value|hex | assertRam:addr,equals|min|max | assert:png (threshold,ignore) | video:{frames,path} | reset:true | cheats:[..] | importCard:path (slot)',
+    description: 'Run many steps in one call. Steps (one key each): wait:N | tap:btn|[btns] (hold,release; "P2:X" = port 2) | press/release:btn | hold:btn,frames | analog:left|right,x,y | waitUntil:{address,op,value}|{screen} (maxFrames) | shot:name | record:{frames,every} | saveState/loadState:id | loadStateFile | read:addr (as) | write:addr,value|hex | assertRam:addr,equals|min|max | assert:png (threshold,ignore) | video:{frames,path} | reset | cheats | importCard | formatCard',
     inputSchema: {
       steps: z.array(z.record(z.string(), z.any())).min(1),
       scale: Scale,
-      outDir: z.string().optional().describe('also save shots + timeline.json'),
+      outDir: z.string().optional().describe('save shots + timeline.json'),
       maxImages: z.number().int().min(0).max(20).default(8),
       video: z.object({ path: z.string(), onlyOnFail: z.boolean().default(true), seconds: z.number().positive().default(10) }).optional()
         .describe('record the run; kept on failure'),
@@ -683,7 +692,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   });
 
   tool('ab_compare', {
-    description: 'Run the same steps on two discs/EXEs (same BIOS, region, pads as the loaded one); reports which shot/read steps differ, with A|B|diff images.',
+    description: 'Run the same steps on two discs/EXEs (same BIOS/region/pads as loaded); shows which shot/read steps differ, with A|B|diff images.',
     inputSchema: {
       romA: z.string(), romB: z.string(),
       steps: z.array(z.record(z.string(), z.any())).min(1),
@@ -759,6 +768,117 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
     return result(`${head} ${search.count} (${search.type}).${lines.length ? `\n${lines.join('\n')}${more}` : ''}`, { count: search.count });
   });
 
+  // ---- Make ----
+  tool('texture', {
+    description: 'PNG → TIM (convert: depth, VRAM x,y in words, clutX/Y; out .tim/.c/.h), inject a PNG/.tim into VRAM, or export a VRAM rect (through a CLUT) to PNG.',
+    inputSchema: {
+      action: z.enum(['convert', 'inject', 'export']),
+      png: z.string().optional(), tim: z.string().optional(),
+      depth: z.union([z.literal(4), z.literal(8), z.literal(16)]).default(4),
+      x: z.number().int().min(0).max(1023).optional(), y: z.number().int().min(0).max(511).optional(),
+      clutX: z.number().int().min(0).max(1023).optional(), clutY: z.number().int().min(0).max(511).optional(),
+      w: z.number().int().min(1).max(1024).optional(), h: z.number().int().min(1).max(512).optional(),
+      transparent: z.string().default('alpha'), quantize: z.boolean().default(false),
+      out: z.string().optional(), name: z.string().optional(),
+      scale: Scale,
+    },
+  }, async (a) => {
+    if (a.action === 'export') {
+      requireRom();
+      if (a.x === undefined || a.y === undefined || !a.w || !a.h) return errText('export needs x, y, w, h (VRAM words for 15-bit; texels with depth 4/8 and a CLUT)');
+      const r = await emu.readRegions();
+      const pngBuf = a.depth === 16 || a.clutX === undefined
+        ? encodePng(vramImage(r, { x: a.x, y: a.y, w: a.w, h: a.h }))
+        : (await import('./gpu.mjs')).texturePng(r, { x: a.x, y: a.y, depth: a.depth === 4 ? '4bit' : '8bit', clut: { x: a.clutX, y: a.clutY ?? 0 }, w: a.w, h: a.h, scale: 1 });
+      let file;
+      if (a.out) { file = await writePath(a.out); await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, pngBuf); }
+      return result(`VRAM ${a.x},${a.y} ${a.w}x${a.h}${file ? ` saved to ${file}` : ''}.`, undefined, [png(scalePng(pngBuf, a.scale))]);
+    }
+    let tim, info = '', files = [], warn = [];
+    if (a.tim) {
+      tim = await readFile(await resolvePath(a.tim));
+      const t = readTim(tim);
+      info = `${a.tim}: ${t.width}x${t.height} ${t.depth}-bit at VRAM ${t.image.x},${t.image.y}${t.clut ? `, CLUT ${t.clut.x},${t.clut.y}` : ''}`;
+    } else if (a.png) {
+      const conv = convertTim(await readFile(await resolvePath(a.png)), { depth: a.depth, x: a.x ?? 640, y: a.y ?? 0, clutX: a.clutX ?? 640, clutY: a.clutY ?? 480, transparent: a.transparent, quantize: a.quantize });
+      tim = conv.tim; warn = conv.warnings;
+      info = `${conv.width}x${conv.height} ${conv.depth}-bit, ${conv.colors} colour(s), pixels at VRAM ${conv.vram.x},${conv.vram.y} (${conv.vram.w}x${conv.vram.h} words)${conv.clut ? `, CLUT ${conv.clut.x},${conv.clut.y}` : ''}; texture page ${Math.floor(conv.vram.x / 64) * 64},${conv.vram.y < 256 ? 0 : 256}, u0 = ${(conv.vram.x % 64) * (16 / conv.depth)}, v0 = ${conv.vram.y % 256}`;
+      if (a.action === 'convert' && a.out) {
+        const out = await writePath(a.out);
+        await mkdir(path.dirname(out), { recursive: true });
+        if (/\.tim$/i.test(out)) await writeFile(out, tim);
+        else if (/\.[ch]$/i.test(out)) await writeFile(out, timToC(tim, a.name ?? path.basename(out).replace(/\.[^.]+$/, '').replace(/\W/g, '_')));
+        else return errText('out must be .tim, .c or .h');
+        files.push(out);
+      }
+    } else return errText('give `png` (or `tim` for inject)');
+    const preview = timToPng(tim, Math.max(1, Math.min(a.scale * 2, 8)));
+    if (a.action === 'convert') return result(`${info}.${warn.length ? ` WARN: ${warn.join('; ')}.` : ''}${files.length ? ` Wrote ${files.join(', ')}.` : ''}`, undefined, [png(preview)]);
+    requireRom();
+    const t = readTim(tim);
+    await emu.writeVram(t.image.x, t.image.y, t.image.w, t.image.h, t.image.data);
+    if (t.clut) {
+      const c = Buffer.alloc(t.clut.colors.length * 2);
+      t.clut.colors.forEach((v, i) => c.writeUInt16LE(v, i * 2));
+      await emu.writeVram(t.clut.x, t.clut.y, t.clut.w, t.clut.h, c);
+    }
+    const r = await emu.readRegions();
+    const img = vramImage(r);
+    outline(img, [{ verts: [[t.image.x, t.image.y], [t.image.x + t.image.w - 1, t.image.y], [t.image.x + t.image.w - 1, t.image.y + t.image.h - 1], [t.image.x, t.image.y + t.image.h - 1]], color: [0, 255, 255] }]);
+    return result(`Injected into VRAM: ${info}. The game draws with it from the next frame if its primitives sample there.${warn.length ? ` WARN: ${warn.join('; ')}.` : ''}`, undefined, [png(encodePng(img))]);
+  }, { needsRom: false });
+
+  tool('background', {
+    description: 'PNG or Tiled .tmx/.tmj → deduped tileset TIM + tile map (out .c/.h, .tim beside it), with a preview. No mirrored-tile merging (the GPU can\'t flip).',
+    inputSchema: {
+      png: z.string().optional(), tiled: z.string().optional(),
+      tile: z.union([z.literal(8), z.literal(16), z.literal(32)]).default(16),
+      depth: z.union([z.literal(4), z.literal(8), z.literal(16)]).default(4),
+      x: z.number().int().min(0).max(1023).default(640), y: z.number().int().min(0).max(511).default(256),
+      clutX: z.number().int().min(0).max(1023).default(640), clutY: z.number().int().min(0).max(511).default(496),
+      dedupe: z.boolean().default(true), out: z.string().optional(), scale: Scale,
+    },
+  }, async (a) => {
+    if (!a.png === !a.tiled) return errText('give `png` or `tiled`');
+    const src = await resolvePath(a.png ?? a.tiled);
+    const img = a.tiled ? await renderTiledMap(src) : await readFile(src);
+    const conv = convertTilemap(img, { tile: a.tile, depth: a.depth, x: a.x, y: a.y, clutX: a.clutX, clutY: a.clutY, dedupe: a.dedupe });
+    const files = a.out ? await writeTilemap(conv, await writePath(a.out), path.basename(a.out).replace(/\.[^.]+$/, '')) : [];
+    const sc = Math.max(1, Math.min(a.scale, Math.floor(1600 / (conv.cols * conv.tile))));
+    return result(`${conv.cols}x${conv.rows} map, ${conv.tileCount} unique ${a.tile}px tiles of ${conv.cells}, tileset ${conv.width}x${conv.height} ${conv.depth}-bit at VRAM ${conv.vram.x},${conv.vram.y}${conv.clut ? ` (CLUT ${conv.clut.x},${conv.clut.y})` : ''}.` +
+      (conv.warnings.length ? ` WARN: ${conv.warnings.join('; ')}.` : '') + (files.length ? ` Wrote ${files.join(', ')}.` : ''), { tiles: conv.tileCount }, [png(scalePng(conv.preview, sc))]);
+  }, { needsRom: false });
+
+  tool('data', {
+    description: 'sound: WAV → SPU ADPCM (.vag/.bin/.c/.h, or .wav to hear it; loop) + pitch. table: fixed-point sin/cos/reciprocal (.c/.h). mesh: .obj → SVECTOR verts/normals + faces (.c/.h).',
+    inputSchema: {
+      kind: z.enum(['sound', 'table', 'mesh']),
+      out: z.string(), name: z.string().optional(),
+      wav: z.string().optional(), rate: z.number().int().min(4000).max(48000).default(22050), loop: z.boolean().default(false), normalize: z.boolean().default(false),
+      table: z.enum(['sin', 'cos', 'reciprocal']).optional(), size: z.number().int().min(2).max(65536).optional(), bits: z.number().int().min(0).max(24).default(12),
+      obj: z.string().optional(),
+    },
+  }, async (a) => {
+    const file = await writePath(a.out);
+    const name = a.name ?? path.basename(a.out).replace(/\.[^.]+$/, '');
+    if (a.kind === 'sound') {
+      if (!a.wav) return errText('sound needs `wav`');
+      const c = encodeVag(await readFile(await resolvePath(a.wav)), { rate: a.rate, loop: a.loop, normalize: a.normalize });
+      const files = await writeSound(c, file, name);
+      return result(`${c.samples} samples, ${c.seconds.toFixed(2)} s at ${c.rate} Hz from ${c.sourceRate} Hz ${c.channels === 1 ? 'mono' : `${c.channels}-ch`}: ${c.adpcm.length} bytes of ADPCM (${c.blocks} blocks)${c.loop ? ', looping' : ''}; SPU pitch 0x${c.pitch.toString(16)}; peak ${(c.peak * 100).toFixed(0)}%${c.clipped ? `, ${c.clipped} samples clipped` : ''}. Wrote ${files.join(', ')}.`, { bytes: c.adpcm.length });
+    }
+    if (a.kind === 'mesh') {
+      if (!a.obj) return errText('mesh needs `obj`');
+      const m = convertMesh(await readFile(await resolvePath(a.obj), 'utf8'), { size: a.size ?? 256 });
+      const files = await writeMesh(m, file, name);
+      return result(`${m.verts.length} vertices, ${m.norms.length} normals, ${m.tris} triangles, ${m.quads} quads, scaled ×${m.scale.toFixed(3)}.${m.warnings.length ? ` WARN: ${m.warnings.join('; ')}.` : ''} Wrote ${files.join(', ')}.`, { faces: m.faces.length });
+    }
+    if (!a.table) return errText('table needs `table` (sin, cos or reciprocal)');
+    const t = makeTable(a.table, { size: a.size ?? 4096, bits: a.bits });
+    const files = await writeTable(t, file, name);
+    return result(`${a.table} table: ${t.size} ${t.type} entries, ${t.bits} fractional bits. Wrote ${files.join(', ')}.`, { size: t.size });
+  }, { needsRom: false });
+
   // ---- Develop ----
   tool('build', {
     description: 'Build (ps1test.json build, else CMake/make): errors as file:line, then load the disc/EXE + symbols and check its header. replay: redo the steps since the last load.',
@@ -803,7 +923,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   }, { needsRom: false });
 
   tool('new_project', {
-    description: 'New game from a working template: text, a moving player sprite, a GTE cube, a passing test, ps1test.json, CI, dev container.',
+    description: 'New game from a working template: text, player sprite, GTE cube, sound, a passing test, ps1test.json, CI, dev container.',
     inputSchema: { template: z.enum(Object.keys(TEMPLATES)).default('psn00bsdk'), path: z.string() },
   }, async ({ template, path: p }) => {
     const dest = await writePath(p);
@@ -812,7 +932,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   }, { needsRom: false });
 
   tool('describe', {
-    description: 'The machine as text, far cheaper than a screenshot: frame, where the CPU is, watched values, display mode, % of the screen changed since the last describe; gpu:true runs one frame and summarises what was drawn. watch sets the variables reported after every step that advances time ("name", "name:s16", "0x80010000:u32"; [] clears).',
+    description: 'Machine as text, cheaper than a screenshot: pc, watched values, display mode, screen change %; gpu:true adds the next frame\'s drawing. watch sets values reported after each step ("name:s16", [] clears).',
     inputSchema: {
       watch: z.array(z.string()).optional(),
       gpu: z.boolean().default(false),
@@ -847,7 +967,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   });
 
   tool('check', {
-    description: 'Hardware rules: PS-EXE header / SYSTEM.CNF, then `frames` frames watching for CPU exceptions, hangs, lag (frame counter), CPU load (cpu_usage variable), a blank or frozen screen, GPU commands the console drops or that texture from the framebuffer, empty CLUTs, DMA from outside RAM, and the stack reaching the data. State restored after.',
+    description: 'Hardware rules: EXE header/SYSTEM.CNF, then `frames` frames watching exceptions, hangs, lag, CPU load, blank screen, dropped/off-screen prims, framebuffer textures, empty CLUTs, DMA, stack. State restored.',
     inputSchema: {
       frames: z.number().int().min(1).max(3600).default(120),
       frameCounter: Address.optional().describe('per-frame counter (default ps1test.json or *frame_count*)'),

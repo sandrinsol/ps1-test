@@ -3,10 +3,13 @@
  * the left stick on an analog pad), some text, and a spinning cube drawn with
  * the GTE. Double-buffered, with an ordering table, like most PS1 games.
  *
+ * Cross plays a sound effect (a VAG sample uploaded to SPU RAM at start).
+ *
  * Variables the test harness reads by name (see ps1test.json):
- *   frame_count  incremented once per main-loop iteration (lag detection)
- *   cpu_usage    % of the last frame spent before waiting for VSync
- *   player_x/y   the player's position
+ *   frame_count    incremented once per main-loop iteration (lag detection)
+ *   cpu_usage      % of the last frame spent before waiting for VSync
+ *   player_x/y     the player's position
+ *   sounds_played  how many times the sound effect was started
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -16,6 +19,7 @@
 #include <psxpad.h>
 #include <psxapi.h>
 #include <psxetc.h>
+#include <psxspu.h>
 #include <hwregs_c.h>
 
 #define SCREEN_W 320
@@ -37,10 +41,39 @@ static uint8_t *next_prim;
 volatile uint32_t frame_count;
 volatile int32_t cpu_usage;
 int16_t player_x = 152, player_y = 160;
+volatile uint32_t sounds_played;
 
 static uint8_t pad_buffers[2][34];
 extern const uint32_t player_tim[];
 static TIM_IMAGE player;
+extern const uint8_t blip_vag[];
+
+/* SPU RAM below 0x1010 is reserved (capture buffers, psxspu's dummy sample). */
+#define BLIP_ADDR 0x1010
+static int blip_rate;
+static uint16_t last_buttons = 0xffff;
+
+/* .vag files: a 48-byte big-endian header, then the ADPCM data. */
+static void load_sound(void) {
+	uint32_t size = __builtin_bswap32(*(const uint32_t *)(blip_vag + 12));
+	blip_rate = __builtin_bswap32(*(const uint32_t *)(blip_vag + 16));
+	SpuSetTransferMode(SPU_TRANSFER_BY_DMA);
+	SpuSetTransferStartAddr(BLIP_ADDR);
+	SpuWrite((const uint32_t *)(blip_vag + 48), (size + 63) & ~63);
+	SpuIsTransferCompleted(SPU_TRANSFER_WAIT);
+}
+
+static void play_sound(void) {
+	SpuSetKey(0, 1 << 0);
+	SPU_CH_FREQ(0) = getSPUSampleRate(blip_rate);
+	SPU_CH_ADDR(0) = getSPUAddr(BLIP_ADDR);
+	SPU_CH_VOL_L(0) = 0x3fff;
+	SPU_CH_VOL_R(0) = 0x3fff;
+	SPU_CH_ADSR1(0) = 0x00ff;
+	SPU_CH_ADSR2(0) = 0x0000;
+	SpuSetKey(1, 1 << 0);
+	sounds_played++;
+}
 
 void draw_cube(uint32_t *ot, int ot_len, uint8_t **prims, int angle);
 
@@ -73,6 +106,9 @@ static void init(void) {
 	gte_SetGeomOffset(SCREEN_W / 2, SCREEN_H / 2 - 20);
 	gte_SetGeomScreen(SCREEN_W / 2);
 
+	SpuInit();
+	load_sound();
+
 	InitPAD(pad_buffers[0], 34, pad_buffers[1], 34);
 	StartPAD();
 	ChangeClearPAD(0);
@@ -85,12 +121,18 @@ static void init(void) {
 
 static void read_pad(void) {
 	PADTYPE *pad = (PADTYPE *)pad_buffers[0];
-	if (pad->stat != 0)
+	/* stat 0 = a pad answered; type 0 = the BIOS hasn't polled it yet (the
+	 * buffer is still all zeros, which would read as every button held). */
+	if (pad->stat != 0 || pad->type == 0)
 		return;
 	if (!(pad->btn & PAD_LEFT))  player_x -= 2;
 	if (!(pad->btn & PAD_RIGHT)) player_x += 2;
 	if (!(pad->btn & PAD_UP))    player_y -= 2;
 	if (!(pad->btn & PAD_DOWN))  player_y += 2;
+	/* Cross pressed this frame (buttons are active-low). */
+	if (!(pad->btn & PAD_CROSS) && (last_buttons & PAD_CROSS))
+		play_sound();
+	last_buttons = pad->btn;
 	/* Analog (DualShock in analog mode, or an analog pad): the left stick too. */
 	if ((pad->type == PAD_ID_ANALOG_STICK || pad->type == PAD_ID_ANALOG) && pad->len >= 3) {
 		int lx = pad->ls_x - 128, ly = pad->ls_y - 128;

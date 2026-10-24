@@ -1,5 +1,5 @@
 # A small PSn00bSDK game: text, a player sprite moved by the D-pad or the left
-# stick, and a GTE-rotated cube. Builds game.exe (+ game.elf with symbols) and a
+# stick, a GTE-rotated cube and a sound effect on Cross. Builds game.exe (+ game.elf with symbols) and a
 # bootable disc, game.bin + game.cue.
 cmake_minimum_required(VERSION 3.21)
 
@@ -21,8 +21,15 @@ project(
 )
 
 psn00bsdk_add_executable(game GPREL src/main.c src/cube.c)
-# The player's texture, converted from assets/player.png (see README).
+# Debian/Ubuntu's mipsel-linux-gnu libgcc is built for MIPS32r2, which the
+# PS1 can't run: use plain-C versions of its helpers instead.
+if(PSN00BSDK_TARGET STREQUAL "mipsel-linux-gnu")
+	target_sources(game PRIVATE src/libgcc_mips1.c)
+endif()
+# The player's texture and the sound effect, converted from assets/player.png
+# and assets/blip.wav (see README).
 psn00bsdk_target_incbin(game PRIVATE player_tim assets/player.tim)
+psn00bsdk_target_incbin(game PRIVATE blip_vag assets/blip.vag)
 
 psn00bsdk_add_cd_image(
 	iso      # Target name

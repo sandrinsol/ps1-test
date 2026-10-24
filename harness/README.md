@@ -76,14 +76,20 @@ VS Code uses the key `"servers"` instead of `"mcpServers"`.
 | `ab_compare` | Run the same steps on two discs/EXEs and report differences. |
 | `ram_search` | Find where a value (HP, score…) is stored: `start`, then `filter` until one address is left. |
 | `build` | Run the project's build (CMake, make, or `ps1test.json`), report compiler errors as `file:line: error: …`, load the new disc/EXE with its symbols. |
+| `texture` | `convert` a PNG to a TIM (4/8/16-bit, pixels and CLUT placed in VRAM; opaque black kept as 0x8000 so it isn't transparent) as `.tim` or a C array; `inject` a PNG or TIM into the running game's VRAM; `export` a VRAM rectangle, through a CLUT, to a PNG. |
+| `background` | A PNG or Tiled map (`.tmx`/`.tmj`) → identical tiles merged, the unique ones packed into a tileset TIM, plus the map of tile numbers as C; returns a preview rebuilt from the output. |
+| `data` | `sound`: WAV → SPU ADPCM (`.vag`, raw, C, or a `.wav` of the result to listen to), looping or one-shot, with the voice pitch value. `table`: fixed-point sin/cos/reciprocal lookup tables (4096 steps per turn). `mesh`: Wavefront `.obj` → `SVECTOR` vertices and normals plus triangle and quad lists (in the GPU's vertex order) for the GTE. |
 | `new_project` | Copy a starter template (`psn00bsdk`): text, a player sprite, a GTE cube, a smoke test with goldens, `ps1test.json`, a CI workflow and a dev container. |
 | `check` | Hardware rules: the PS-EXE header and `SYSTEM.CNF` (region marker, load address, entry, size), then a short run watching for CPU exceptions (unaligned or bad addresses, bus errors, …, with the faulting function), hangs, lag frames (`frameCounter`), CPU load (`cpu_usage`), a blank or frozen screen, polygons the GPU drops (> 1023×511), primitives outside the drawing area, textures and CLUTs inside the framebuffer, all-zero CLUTs, DMA from outside RAM, unaligned DMA chains, and the stack reaching the program's data. |
 
 Prompts: `smoke_test_rom`, `regression_check`, `find_ram_address`,
 `record_regression_test`. Resources: `emu://screen`, `emu://status`.
 
-**Token use.** Tool definitions are sent with every request; `PS1TEST_TOOLS=core`
-exposes a smaller set. A 2× screenshot is ~410 tokens. Prefer one `run_sequence`
+**Token use.** Tool definitions are sent with every request: ~3,700 tokens for all
+tools, ~1,800 with `PS1TEST_TOOLS=core` (`load_disc wait_frames press set_button
+set_analog wait_until screenshot read_memory write_memory run_sequence assert_golden
+status build describe`). A 2× screenshot is ~410 tokens; `describe` is usually under
+100. Prefer one `run_sequence`
 over many single calls, and `wait_until` over wait-and-check loops.
 
 Start a game from the template with `new_project`, or from the clone:
@@ -189,8 +195,9 @@ await emu.close();
 | `symbols`, `useSymbols(file)`, `addr(nameOrAddress)`, `options`, `close()` | |
 
 GPU decoding and VRAM images (`gpu.mjs`), memory cards (`mcard.mjs`), the
-hardware rules (`checks.mjs`) and disc reading (`disc.mjs`: `isoFile`, `systemCnf`)
-can also be used on their own. `disc.mjs` also builds bootable discs: `makeDisc({ exe, out, files })` wraps a
+hardware rules (`checks.mjs`), disc reading (`disc.mjs`: `isoFile`, `systemCnf`),
+TIM conversion (`tim.mjs`), VAG sound, tables and meshes (`gamedata.mjs`) and
+tilemaps (`tilemap.mjs`) can also be used on their own. `disc.mjs` also builds bootable discs: `makeDisc({ exe, out, files })` wraps a
 PS-EXE (and data files) into an ISO 9660 Mode 2 `.bin`/`.cue` with `SYSTEM.CNF`,
 and `exe.mjs` turns an `.elf` into a PS-EXE.
 

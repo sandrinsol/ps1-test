@@ -151,7 +151,13 @@ export class RunChecker {
     const out = [];
     const n = this.frames;
     for (const e of this.exceptions.values()) {
-      out.push({ level: 'error', msg: `CPU exception: ${EXC_NAMES[e.code] ?? `code ${e.code}`} at ${hex(e.epc)}${this.name(e.epc) ? ` (${this.name(e.epc)})` : ''}${e.code === 4 || e.code === 5 ? `, address ${hex(e.badVaddr)}` : ''}; first on frame ${e.frame} of the run${e.count > 1 ? `, ${e.count} times` : ''}` });
+      const fn = this.name(e.epc);
+      // A reserved instruction inside a compiler helper (__bswapsi2, __udivdi3…):
+      // a libgcc built for a newer MIPS than the PS1's MIPS I.
+      const hint = e.code === 10 && fn && /^__\w+/.test(fn)
+        ? ': a compiler runtime helper using instructions the R3000A lacks — the toolchain\'s libgcc was built for a newer MIPS (e.g. Debian/Ubuntu\'s mipsel-linux-gnu, MIPS32r2). Use a MIPS I toolchain (mipsel-none-elf) or plain-C versions of the helpers (templates/psn00bsdk/src/libgcc_mips1.c)'
+        : '';
+      out.push({ level: 'error', msg: `CPU exception: ${EXC_NAMES[e.code] ?? `code ${e.code}`} at ${hex(e.epc)}${fn ? ` (${fn})` : ''}${e.code === 4 || e.code === 5 ? `, address ${hex(e.badVaddr)}` : ''}; first on frame ${e.frame} of the run${e.count > 1 ? `, ${e.count} times` : ''}${hint}` });
     }
     // In the BIOS/kernel at every frame boundary AND no sign of the game running
     // (games that wait for VSync through the kernel's interrupt handler are at
