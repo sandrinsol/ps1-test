@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PS1 Harness</title>
+  <style>
+    html, body { margin: 0; background: #000; }
+    /* Fixed size so screenshots are deterministic (the core's own screenshots are
+       taken at its native output size anyway). */
+    #game { width: 640px; height: 480px; }
+  </style>
+</head>
+<body>
+  <div id="game"></div>
+  <script>
+  // Headless control bridge over the bundled EmulatorJS pcsx_rearmed core.
+  // Everything the Node driver calls goes through window.Emu.
+  (function () {
+    const params = new URLSearchParams(location.search);
+    const rom = params.get('rom');   // disc image or PS-EXE, served by the harness
+    // BIOS: a URL to a BIOS image (OpenBIOS by default, or the user's), or 'hle'
+    // for the core's built-in high-level emulation.
+    const bios = params.get('bios') || 'hle';
+    const region = (params.get('region') || 'ntsc').toUpperCase(); // NTSC | PAL | AUTO
+    // Controller per port: digital pad, DualShock (digital until the game turns
+    // analog on, like the real one), an analog pad (a DualShock switched to analog
+    // at boot by the driver), or none.
+    const PADS = { digital: 257, dualshock: 517, analog: 517, none: 0 };
+    const pads = [params.get('pad1') || 'dualshock', params.get('pad2') || 'none'];
+
+    // --- EmulatorJS config (headless + deterministic) ---
+    window.EJS_player = '#game';
+    window.EJS_core = 'psx';
+    window.EJS_gameName = 'harness';
+    window.EJS_gameUrl = rom;
+    window.EJS_pathtodata = '../data/';
+    if (bios !== 'hle') window.EJS_biosUrl = bios;
+    window.EJS_startOnLoaded = true;
+    window.EJS_volume = 0;            // mute; audio is captured from the core directly
+    window.EJS_language = 'en-US';
+    window.EJS_disableAutoLang = false;
+    window.EJS_threads = false;       // single-thread: deterministic, no COOP/COEP needed
+    window.EJS_disableDatabases = true;
+    window.EJS_defaultOptions = {
+      pcsx_rearmed_bios: bios === 'hle' ? 'HLE' : 'auto',
+      pcsx_rearmed_region: region === 'AUTO' ? 'auto' : region,
+      pcsx_rearmed_show_bios_bootlogo: 'disabled',
+      pcsx_rearmed_frameskip_type: 'disabled',  // every frame is rendered
+      pcsx_rearmed_spu_thread: 'disabled',
+      pcsx_rearmed_gpu_thread_rendering: 'disabled',
+      pcsx_rearmed_memcard2: 'enabled',         // slot 2 exists, so it can be imported
+      pcsx_rearmed_multitap: 'disabled',
+      pcsx_rearmed_analog_combo: 'l1+r1+select', // the driver's analog switch (never seen by the game)
+      // Raise address-error / bus-error exceptions as the console does, so code
+      // that would crash on hardware crashes here too (and check can see it).
+      pcsx_rearmed_exception_emulation: 'enabled',
+    };
+    // The controller types go in a RetroArch remap file for the core (where
+    // RetroArch keeps input_libretro_device_pN), written with the core's config
+    // before the game starts.
+    const remap = pads.map((p, i) => `input_libretro_device_p${i + 1} = "${PADS[p] ?? 517}"\n`).join('');
+    let hooked = false;
+    const hookGameManager = () => {
+      const GM = window.EJS_GameManager;
+      if (!GM || hooked) return;
+      hooked = true;
+      const write = GM.prototype.writeConfigFile;
+      GM.prototype.writeConfigFile = function (...a) {
+        this.writeFile('/home/web_user/retroarch/userdata/config/remaps/PCSX-ReARMed/PCSX-ReARMed.rmp', remap);
+        return write.apply(this, a);
+      };
+    };
+    Object.defineProperty(window, 'EJS_emulator', {
+      configurable: true,
+      get() { return this.__ejs; },
+      set(v) {
+        this.__ejs = v;
+        const init = v.initGameCore.bind(v);
+        v.initGameCore = (...a) => { hookGameManager(); return init(...a); };
+      },
+    });
+    const FPS = region === 'PAL' ? 50 : 60;
+
+    // --- Bridge ---
+    const Emu = (window.Emu = {});
+    Emu.system = 'psx';
+    Emu.fps = FPS;
+    Emu.pads = pads;
+    Emu._startPromise = new Promise((res) => (Emu._resolveStart = res));
+    Emu.started = false;
+    window.EJS_onGameStart = () => { Emu.started = true; Emu._resolveStart(); };
+
+    // RetroArch joypad ids used by simulateInput(player, id, value). The PS1
+    // core maps RetroArch B/Y/A/X to Cross/Square/Circle/Triangle.
+    const BUTTONS = {
+      CROSS: 0, SQUARE: 1, SELECT: 2, START: 3, UP: 4, DOWN: 5, LEFT: 6, RIGHT: 7,
+      CIRCLE: 8, TRIANGLE: 9, L1: 10, R1: 11, L2: 12, R2: 13, L3: 14, R3: 15,
+    };
+    const ALIASES = { X: 'CROSS', O: 'CIRCLE', CIRCLE: 'CIRCLE', SQ: 'SQUARE', TRI: 'TRIANGLE', L: 'L1', R: 'R1' };
+    Emu.BUTTONS = Object.keys(BUTTONS);
+    const buttonId = (name) => {
+      const key = String(name).toUpperCase().replace(/^(P2[:.]|2[:.])/, '');
+      const k = BUTTONS[key] !== undefined ? key : ALIASES[key];
+      if (k === undefined) throw new Error(`Unknown button: ${name} (use ${Emu.BUTTONS.join(' ')})`);
+      return [k, /^(P2|2)[:.]/i.test(String(name)) ? 1 : 0];
+    };
+
+    const gm = () => window.EJS_emulator.gameManager;
+
+    Emu.ready = () => Emu._startPromise;
+    // Logical frame clock = the core's counter minus an offset. The offset only moves
+    // when fast-forward overshoot recovery rewinds the machine (the counter itself
+    // never rewinds), so frameNum() always names the emulated frame you're on.
+    Emu._offset = 0;
+    Emu.frameNum = () => gm().getFrameNum() - Emu._offset; // absolute, boot-referenced
+    Emu.videoDimensions = () => ({ w: gm().getVideoDimensions('width'), h: gm().getVideoDimensions('height') });
+
+    const pressed = new Set();
+    // Buttons on port 2 are written "P2:CROSS".
+    Emu.setButton = (name, down) => {
+      const [key, port] = buttonId(name);
+      gm().simulateInput(port, BUTTONS[key], down ? 1 : 0);
+      const label = (port ? 'P2:' : '') + key;
+      if (down) pressed.add(label); else pressed.delete(label);
+    };
+    Emu.setButtons = (names, down) => { for (const n of names) Emu.setButton(n, down); };
+    Emu.heldButtons = () => [...pressed];
+
+    // Analog sticks: x/y in -128..127 (0 = centre; +x right, +y down, as the pad
+    // reports). Each axis is a +/- pair of inputs 16-23 in EmulatorJS.
+    const sticks = { 'P1:left': [0, 0], 'P1:right': [0, 0], 'P2:left': [0, 0], 'P2:right': [0, 0] };
+    Emu.setAnalog = (stick, x, y, port = 0) => {
+      const s = String(stick).toLowerCase();
+      if (s !== 'left' && s !== 'right') throw new Error('stick must be "left" or "right"');
+      const clamp = (v) => Math.max(-128, Math.min(127, Math.round(Number(v) || 0)));
+      x = clamp(x); y = clamp(y);
+      const base = s === 'left' ? 16 : 20;
+      const amt = (v) => Math.min(32767, Math.round(Math.abs(v) * 32767 / 127));
+      gm().simulateInput(port, base, x > 0 ? amt(x) : 0);
+      gm().simulateInput(port, base + 1, x < 0 ? amt(x) : 0);
+      gm().simulateInput(port, base + 2, y > 0 ? amt(y) : 0);
+      gm().simulateInput(port, base + 3, y < 0 ? amt(y) : 0);
+      sticks[`P${port + 1}:${s}`] = [x, y];
+    };
+    Emu.analog = () => sticks;
+
+    // ---- Fast-forward (deterministic) ----
+    // The core can't be single-stepped, so long waits run in fast-forward and drop
+    // back to 1x FF_MARGIN frames before the target; at 1x the core advances at most
+    // one frame per animation frame, so we land exactly on the target. If a stall
+    // ever makes fast-forward jump past the target anyway, we restore an in-page
+    // snapshot taken at the start of the wait and redo it at 1x — so results are
+    // bit-identical to a pure 1x run either way. Disable with ?fast=0.
+    Emu.fast = params.get('fast') !== '0';
+    const FF_RATIO = 8, FF_MARGIN = 60;
+    Emu.stats = { ffWaits: 0, recoveries: 0, restoreRetries: 0, rewinds: 0 };
+    Emu._forceOvershoot = false; // test hook: pretend the next fast-forward overshot
+    let ffOn = false;
+    const setFF = (on) => {
+      if (on === ffOn) return;
+      ffOn = on;
+      if (on) gm().setFastForwardRatio(FF_RATIO);
+      gm().toggleFastForward(on ? 1 : 0);
+    };
+
+    // The core is PAUSED between calls and only runs inside a wait, so every
+    // screenshot / RAM read / write lands on exactly the frame the clock says —
+    // not wherever wall-clock time has drifted to since the last call.
+    Emu._running = true;
+    Emu.pause = () => { if (Emu._running) { gm().toggleMainLoop(0); Emu._running = false; } };
+    Emu.resume = () => { if (!Emu._running) { gm().toggleMainLoop(1); Emu._running = true; } };
+
+    const raf = () => new Promise((r) => requestAnimationFrame(r));
+
+    // Swap the machine state while keeping the logical clock on `frame`. A load is
+    // queued and applied by a later main-loop iteration; depending on frame pacing
+    // that iteration may or may not also run a core frame, so after it we compare
+    // the machine to the requested state and retry until it matches exactly.
+    // Compared: main RAM, scratchpad, CPU + GTE registers and VRAM (the save
+    // counter and some GPU bookkeeping words always change on a load).
+    const ST = 16 + 32 + 4 + 1 + 128 * 96 * 3;           // RASTATE header + pcsx header → RAM
+    const REGS = ST + 0x200000 + 0x80000 + 0x10000;
+    const VRAM = REGS + 792 + 8 + 1024;
+    const SAME = [[ST, 0x200000], [ST + 0x280000, 0x400], [REGS, 131 * 4], [VRAM, 0x100000]];
+    const sameState = (a, b) => {
+      if (a.length !== b.length) return false;
+      for (const [o, n] of SAME) for (let i = o; i < o + n; i++) if (a[i] !== b[i]) return false;
+      return true;
+    };
+    const restore = async (u8, frame) => {
+      setFF(false);
+      for (let attempt = 0; attempt < 10; attempt++) {
+        gm().loadState(u8);
+        Emu.stats.rewinds++; // this iteration runs one frame of the old timeline
+        const c = gm().getFrameNum();
+        Emu.resume();
+        while (gm().getFrameNum() <= c) await raf();
+        Emu.pause();
+        if (sameState(gm().getState(), u8)) { Emu._offset = gm().getFrameNum() - frame; Emu._fbValid = false; return; }
+        Emu.stats.restoreRetries++;
+      }
+      throw new Error('could not restore the save state exactly');
+    };
+
+    // ---- Frame capture ----
+    // The core renders a screenshot when its main loop processes the request, at
+    // the start of the next iteration — i.e. it shows the frame current when the
+    // request was made. So one request per iteration while running captures every
+    // frame (verified identical to paused screenshots of the same frames).
+    const SHOT = '/screenshot.png';
+    const requestShot = () => { try { gm().FS.unlink(SHOT); } catch {} gm().functions.screenshot(); };
+    const readShot = () => { try { return gm().FS.readFile(SHOT); } catch { return null; } };
+
+    // ---- Audio ----
+    // The core's audio goes out through Emscripten's OpenAL, which creates one
+    // AudioBuffer per chunk. Normally the driver drops or repeats chunks depending
+    // on the real audio clock (suspended in headless Chrome); driving that clock
+    // from the emulated frame counter instead keeps the stream in step with the
+    // frames. It is not bit-exact across runs: chunk boundaries can shift by one,
+    // and every restore (screenshot, state load, RAM write, fast-forward recovery)
+    // runs one frame of the abandoned timeline, whose sound goes into RetroArch's
+    // resampler and can't be taken back (Emu.stats.rewinds counts them). The
+    // picture and RAM are unaffected. While recording, chunks are collected.
+    Emu._audio = null; // { chunks: AudioBuffer[] } while recording
+    Emu.initAudio = () => {
+      const ctx = gm().Module.AL && gm().Module.AL.currentCtx && gm().Module.AL.currentCtx.audioCtx;
+      if (!ctx || ctx.__gbtest) return !!ctx;
+      const base = ctx.currentTime, f0 = gm().getFrameNum();
+      Object.defineProperty(ctx, 'currentTime', { configurable: true, get: () => base + (gm().getFrameNum() - f0) / FPS });
+      const create = ctx.createBuffer.bind(ctx);
+      ctx.createBuffer = (...a) => { const b = create(...a); if (Emu._audio) Emu._audio.chunks.push(b); return b; };
+      ctx.__gbtest = true;
+      return true;
+    };
+    // Interleaved 16-bit PCM of the collected chunks → { rate, channels, pcm: base64 }.
+    const audioOut = (chunks) => {
+      if (!chunks.length) return null;
+      const ch = chunks[0].numberOfChannels, rate = chunks[0].sampleRate;
+      const total = chunks.reduce((n, b) => n + b.length, 0);
+      const pcm = new Int16Array(total * ch);
+      let o = 0;
+      for (const b of chunks) {
+        const data = Array.from({ length: ch }, (_, c) => b.getChannelData(c));
+        for (let i = 0; i < b.length; i++) for (let c = 0; c < ch; c++) pcm[o++] = Math.max(-32768, Math.min(32767, Math.round(data[c][i] * 32767)));
+      }
+      return { rate, channels: ch, pcm: u8ToB64(new Uint8Array(pcm.buffer)) };
+    };
+
+    // Recording: while Emu._rec is set, waits run at 1x and recTick() (called once
+    // per animation frame) collects frames into a ring buffer.
+    Emu._rec = null;
+    function recTick() {
+      const R = Emu._rec;
+      if (!R) return;
+      if (R.pending !== null) {
+        const d = readShot();
+        if (!d) return;
+        R.frames.push({ frame: R.pending, png: u8ToB64(d) });
+        if (R.frames.length > R.max) R.frames.shift();
+        R.pending = null;
+      }
+      const f = Emu.frameNum();
+      if (f !== R.last && (f - R.origin) % R.every === 0) { requestShot(); R.pending = f; R.last = f; }
+    }
+    Emu.recStart = (every = 1, max = 600) => {
+      Emu._rec = { every, max, frames: [], pending: null, last: null, origin: Emu.frameNum() };
+      Emu._audio = { chunks: [] };
+      recTick(); // request the current frame; it is collected once the loop runs
+    };
+    Emu.recStop = async () => {
+      const R = Emu._rec;
+      if (!R) return [];
+      // A request still queued (paused right after it): capture that frame exactly.
+      // captureScreen() adds it to the recording.
+      if (R.pending !== null) await captureScreen();
+      Emu._rec = null;
+      const A = Emu._audio;
+      Emu._audio = null;
+      // With a ring buffer, keep only the audio that goes with the kept frames
+      // (~1/60 s of samples per frame).
+      let chunks = A ? A.chunks : [];
+      if (chunks.length && R.frames.length) {
+        const spanFrames = R.frames[R.frames.length - 1].frame - R.frames[0].frame + R.every;
+        const want = Math.round(spanFrames * chunks[0].sampleRate / FPS);
+        let have = 0, i = chunks.length;
+        while (i > 0 && have < want) have += chunks[--i].length;
+        chunks = chunks.slice(i);
+      }
+      return { frames: R.frames, audio: audioOut(chunks) };
+    };
+
+    // Run until the clock reaches an absolute target, then pause. A wall-clock
+    // timeout (scaled to the distance, so long 1x waits don't trip it) guards
+    // against a stalled main loop.
+    async function waitUntil(targetFrame) {
+      if (Emu.frameNum() >= targetFrame) { Emu.pause(); return Emu.frameNum(); }
+      const timeoutMs = 30000 + (targetFrame - Emu.frameNum()) * (1000 / FPS) * 2;
+      const t0 = performance.now();
+      let snap = null, snapFrame = 0;
+      if (Emu.fast && !Emu._rec && targetFrame - Emu.frameNum() > FF_MARGIN * 2) {
+        snapFrame = Emu.frameNum();
+        snap = gm().getState();
+        Emu.stats.ffWaits++;
+      }
+      Emu.resume();
+      if (snap) setFF(true);
+      for (;;) {
+        let f = Emu.frameNum();
+        if (snap && (f > targetFrame || (Emu._forceOvershoot && ffOn && f > snapFrame))) {
+          // Overshot: rewind to the snapshot and finish this wait at 1x.
+          Emu._forceOvershoot = false;
+          Emu.stats.recoveries++;
+          await restore(snap, snapFrame);
+          snap = null;
+          Emu.resume();
+          f = Emu.frameNum();
+        }
+        if (ffOn && targetFrame - f <= FF_MARGIN) setFF(false);
+        if (f >= targetFrame && !ffOn) { Emu.pause(); Emu._advanced(); return f; }
+        if (performance.now() - t0 > timeoutMs) {
+          setFF(false);
+          Emu.pause();
+          throw new Error(`waitFrames timeout: frame ${f} < target ${targetFrame}`);
+        }
+        await raf();
+        recTick();
+      }
+    }
+
+    // Deterministic clock: targets accumulate on ONE absolute timeline anchored at
+    // boot (frame 0), so identical scripts stop on identical emulated frames across
+    // runs regardless of boot jitter. (Verified bit-identical.)
+    Emu._target = 0;
+    Emu.waitFrames = (n) => { Emu._target += n; return waitUntil(Emu._target); };
+    Emu.waitUntilFrame = (abs) => { if (abs > Emu._target) Emu._target = abs; return waitUntil(abs); };
+
+    // Press button(s), hold for holdFrames, release, then settle for releaseFrames.
+    // `name` may be one button or an array pressed together (e.g. ['A','B']).
+    Emu.tap = async (name, holdFrames = 4, releaseFrames = 4) => {
+      const names = Array.isArray(name) ? name : [name];
+      Emu.setButtons(names, true);
+      await Emu.waitFrames(holdFrames);
+      Emu.setButtons(names, false);
+      await Emu.waitFrames(releaseFrames);
+    };
+
+    const u8ToB64 = (bytes) => {
+      const u8 = new Uint8Array(bytes);
+      let bin = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < u8.length; i += CHUNK) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+      return btoa(bin);
+    };
+    const b64ToU8 = (b64) => {
+      const bin = atob(b64);
+      const u8 = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      return u8;
+    };
+
+    // ---- Screen tracking ----
+    // A save state doesn't contain the rendered picture, and every restore runs one
+    // main-loop iteration of the OLD timeline, so after a restore the core's
+    // framebuffer is stale. We therefore track the screen explicitly:
+    //  - _fbValid: the framebuffer shows the current frame (true right after a wait)
+    //  - _screen:  cached PNG of the current frame (survives restores that don't
+    //              change what's on screen, e.g. RAM pokes)
+    //  - shotByState: PNGs of states handed out by saveState(), so loading one of
+    //              them restores its picture too.
+    Emu._fbValid = true;
+    Emu._screen = null;
+    const shotByState = new Map(); // hash -> png b64 (bounded)
+    const hashState = (u8) => {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < u8.length; i++) h = Math.imul(h ^ u8[i], 16777619);
+      return (h >>> 0).toString(16) + ':' + u8.length;
+    };
+    Emu._advanced = () => { Emu._fbValid = true; Emu._screen = null; };
+
+    // The core only renders a screenshot from inside its main loop, so while paused
+    // we run it just long enough to capture, then restore the exact pre-capture state.
+    async function captureScreen() {
+      const snap = gm().getState(), f = Emu.frameNum();
+      if (Emu._rec && Emu._rec.pending === f) Emu._rec.pending = null; // superseded by this capture
+      requestShot();
+      Emu.resume();
+      try {
+        let d;
+        while (!(d = readShot())) await raf();
+        const png = u8ToB64(d);
+        if (Emu._rec && Emu._rec.last === f && !Emu._rec.frames.some((x) => x.frame === f)) Emu._rec.frames.push({ frame: f, png });
+        return png;
+      } finally { Emu.pause(); await restore(snap, f); }
+    }
+    /** -> { png: base64, stale: bool }. stale = the picture for this exact state is
+     *  unknown (e.g. right after loading an external save state) and the image is the
+     *  last frame the core rendered; advance >= 1 frame for a true picture. */
+    Emu.screenshot = async () => {
+      if (Emu._running) { requestShot(); let d; while (!(d = readShot())) await raf(); return { png: u8ToB64(d), stale: false }; }
+      if (Emu._screen) return { png: Emu._screen, stale: false };
+      const stale = !Emu._fbValid;
+      const png = await captureScreen();
+      if (!stale) Emu._screen = png;
+      return { png, stale };
+    };
+    const ensureScreen = async () => { if (!Emu._screen && Emu._fbValid) Emu._screen = await captureScreen(); };
+
+    // Raw machine state (for RAM reads; no screen bookkeeping).
+    Emu.rawState = async () => u8ToB64(await gm().getState());
+    // Public save state: also remembers the picture so loading it restores the screen.
+    Emu.saveState = async () => {
+      await ensureScreen();
+      const u8 = gm().getState();
+      if (Emu._screen) {
+        if (shotByState.size >= 64) shotByState.delete(shotByState.keys().next().value);
+        shotByState.set(hashState(u8), Emu._screen);
+      }
+      return u8ToB64(u8);
+    };
+    // The logical clock keeps counting from where it is (a state doesn't carry the
+    // frontend's frame counter) unless `frame` says what to set it to; re-anchor
+    // the deterministic target so later waitFrames() calls stay correct.
+    Emu.loadState = async (b64, frame) => {
+      Emu.pause();
+      const u8 = b64ToU8(b64);
+      await restore(u8, frame ?? Emu.frameNum());
+      Emu._target = Emu.frameNum();
+      Emu._fbValid = false;
+      Emu._screen = shotByState.get(hashState(u8)) || null;
+    };
+    // Load a patched copy of the CURRENT state (RAM poke): what's on screen is unchanged.
+    Emu.pokeState = async (b64) => {
+      Emu.pause();
+      await ensureScreen();
+      await restore(b64ToU8(b64), Emu.frameNum());
+      Emu._fbValid = false;
+    };
+    // Reset (like the console's reset button; memory cards are kept). The core
+    // applies a queued reset before running its next frame, so after exactly one
+    // counted frame the machine is "reset + 1 frame": put the clock at 1 and the
+    // wait target back to 0, as after a fresh boot (the driver then runs it to
+    // its fixed boot frame).
+    // A side-loaded PS-EXE has no disc to boot from after a real reset (the BIOS
+    // would sit in its shell), so for an EXE "reset" restores the machine (and
+    // picture) as it was when the EXE started (captureBoot): the same restart.
+    Emu._boot = null;
+    Emu.captureBoot = async () => {
+      const png = await captureScreen();
+      Emu._boot = { state: gm().getState(), frame: Emu.frameNum(), png };
+      Emu._screen = png;
+    };
+    Emu.reset = async () => {
+      setFF(false);
+      Emu.pause();
+      if (Emu._boot) {
+        await restore(Emu._boot.state, Emu._boot.frame);
+        Emu._target = Emu._boot.frame;
+        Emu._screen = Emu._boot.png;
+        return;
+      }
+      gm().restart();
+      const c = gm().getFrameNum();
+      Emu.resume();
+      while (gm().getFrameNum() <= c) await raf();
+      Emu.pause();
+      Emu._offset = gm().getFrameNum() - 1;
+      Emu._target = 0;
+      Emu._advanced();
+    };
+
+    // ---- Cheats (GameShark / Action Replay: "80XXXXXX YYYY") ----
+    Emu.setCheats = (codes) => {
+      gm().resetCheat();
+      codes.forEach((c, i) => gm().setCheat(i, 1, c));
+    };
+
+    // ---- Wait for a condition on the machine state ----
+    // spec.kind 'value': bytes at state offsets `offsets` (little-endian, width =
+    //   offsets.length, `signed`) compared with op eq/ne/gt/lt/gte/lte to `value`,
+    //   or 'changed' (differs from the value when the wait started).
+    // spec.kind 'video': `ranges` ([start, len] in the state) hashed; mode 'changed'
+    //   = differs from the start, 'stable' = unchanged for `frames` frames.
+    // Fast mode checks while fast-forwarding; once the condition holds it rewinds to
+    // the last frame where it did not and replays at 1x, so the reported frame is
+    // the first one where it holds. (A condition that turns true and false again
+    // between two fast-forward checks — a few frames — can be missed; precise:true
+    // checks every frame at 1x.) 'stable' always runs at 1x.
+    // -> { met, frame }  (paused on the first matching frame, or at the limit)
+    Emu.waitFor = async (spec, maxFrames, precise = false) => {
+      const fnv = (u8) => {
+        let h = 0x811c9dc5;
+        for (const [a, n] of spec.ranges) for (let i = a; i < a + n; i++) h = Math.imul(h ^ u8[i], 16777619);
+        return h >>> 0;
+      };
+      const val = (u8) => {
+        let v = 0;
+        for (let i = spec.offsets.length - 1; i >= 0; i--) v = v * 256 + u8[spec.offsets[i]];
+        const bits = spec.offsets.length * 8;
+        if (spec.signed && v >= 2 ** (bits - 1)) v -= 2 ** bits;
+        return v;
+      };
+      // Live memory (instrumented core): read the bytes in place; otherwise
+      // from a save state each frame.
+      const liveFnv = () => {
+        let h = 0x811c9dc5;
+        const v = area(2);
+        for (let i = 0; i < v.length; i += 4) h = Math.imul(h ^ (v[i] | (v[i + 1] << 8) | (v[i + 2] << 16) | (v[i + 3] << 24)), 16777619);
+        return h >>> 0;
+      };
+      const liveVal = () => {
+        let v = 0;
+        for (let i = spec.live.length - 1; i >= 0; i--) v = v * 256 + area(spec.live[i][0])[spec.live[i][1]];
+        const bits = spec.live.length * 8;
+        if (spec.signed && v >= 2 ** (bits - 1)) v -= 2 ** bits;
+        return v;
+      };
+      const measure = spec.live
+        ? () => (spec.kind === 'video' ? liveFnv() : liveVal())
+        : (u8) => (spec.kind === 'video' ? fnv(u8) : val(u8));
+      const start = spec.live ? measure() : measure(gm().getState());
+      const cmp = {
+        eq: (v) => v === spec.value, ne: (v) => v !== spec.value, gt: (v) => v > spec.value,
+        lt: (v) => v < spec.value, gte: (v) => v >= spec.value, lte: (v) => v <= spec.value,
+        changed: (v) => v !== start,
+      };
+      const stable = spec.kind === 'video' && spec.mode === 'stable';
+      const test = spec.kind === 'video' ? cmp.changed : cmp[spec.op];
+      const limit = Emu.frameNum() + maxFrames;
+      const t0 = performance.now(), timeoutMs = 30000 + maxFrames * (1000 / FPS) * 2;
+      let last = start, lastChange = Emu.frameNum();
+      let lastFalse = null, lastFalseFrame = 0;
+      let fast = Emu.fast && !precise && !stable && !Emu._rec;
+      const done = (met) => { setFF(false); Emu.pause(); Emu._target = Emu.frameNum(); Emu._advanced(); return { met, frame: Emu.frameNum() }; };
+      Emu.resume();
+      for (;;) {
+        const f = Emu.frameNum();
+        // A state per frame only when fast-forwarding (to rewind to) or reading from states.
+        const u8 = !spec.live || (fast && !stable) ? gm().getState() : null;
+        const m = spec.live ? measure() : measure(u8);
+        if (stable) {
+          if (m !== last) { last = m; lastChange = f; }
+          if (f - lastChange >= spec.frames) return done(true);
+        } else if (test(m)) {
+          if (ffOn && lastFalse && f > lastFalseFrame + 1) {
+            // Fast-forward skipped frames: rewind and find the first match at 1x.
+            await restore(lastFalse, lastFalseFrame);
+            fast = false; lastFalse = null;
+            Emu.resume();
+            continue;
+          }
+          return done(true);
+        } else {
+          lastFalse = u8; lastFalseFrame = f;
+        }
+        if (f >= limit) return done(false);
+        if (performance.now() - t0 > timeoutMs) { done(false); throw new Error(`waitFor timeout at frame ${f}`); }
+        setFF(fast && limit - f > FF_MARGIN);
+        await raf();
+        recTick();
+      }
+    };
+
+
+    // Live system RAM, IF the loaded core exports the libretro memory API.
+    // The stock pcsx_rearmed build does NOT (returns null); a core rebuilt with
+    // _retro_get_memory_data/_size exported lights this up automatically.
+    Emu.readSystemRam = () => {
+      const M = gm().Module;
+      if (typeof M._retro_get_memory_data !== 'function' || typeof M._retro_get_memory_size !== 'function') return null;
+      const size = M._retro_get_memory_size(2 /* RETRO_MEMORY_SYSTEM_RAM */);
+      const ptr = M._retro_get_memory_data(2);
+      if (!size || !ptr) return null;
+      return { base64: u8ToB64(M.HEAPU8.subarray(ptr, ptr + size)), size };
+    };
+    Emu.hasMemoryAccess = () => Emu.readSystemRam() !== null;
+
+    // ---- ps1-test core instrumentation ----
+    // The bundled core is built with core/pcsx_rearmed-ps1test.patch: a log of the
+    // GPU commands (and CPU exceptions) of the frames run while it's on, and
+    // pointers to the emulated RAM / scratchpad+I/O / VRAM / BIOS. A stock core
+    // lacks these and the harness falls back to save-state parsing.
+    const M = () => gm().Module;
+    Emu.hasInstrumentation = () => typeof M()._ps1test_log_ctl === 'function';
+    Emu.logCtl = (on) => { if (Emu.hasInstrumentation()) M()._ps1test_log_ctl(on ? 1 : 0); };
+    /** The log as { words: base64 (LE u32s), overflow }, or null. */
+    Emu.logRead = () => {
+      if (!Emu.hasInstrumentation()) return null;
+      const ptr = M()._ps1test_log_buf(), n = M()._ps1test_log_len();
+      return { words: u8ToB64(M().HEAPU8.subarray(ptr, ptr + n * 4)), overflow: !!(M()._ps1test_log_flags() & 2) };
+    };
+    // Live memory: 0 RAM (2 MB), 1 scratchpad + I/O (64 KB), 2 VRAM (1 MB), 3 BIOS.
+    const AREA_SIZE = [0x200000, 0x10000, 0x100000, 0x80000];
+    const area = (which) => { const p = M()._ps1test_ptr(which); return p ? M().HEAPU8.subarray(p, p + AREA_SIZE[which]) : null; };
+    Emu.liveRead = (which, off, len) => { const a = Emu.hasInstrumentation() && area(which); return a ? u8ToB64(a.subarray(off, off + len)) : null; };
+    /** runs: [[area, offset, length]] → base64 of the bytes, in order. */
+    Emu.liveReadRuns = (runs) => {
+      const out = new Uint8Array(runs.reduce((n, r) => n + r[2], 0));
+      let o = 0;
+      for (const [w, off, len] of runs) { out.set(area(w).subarray(off, off + len), o); o += len; }
+      return u8ToB64(out);
+    };
+    /** Write bytes (base64) over the runs, on the paused machine. The picture is
+     *  unchanged (the next frame shows any effect). */
+    Emu.liveWriteRuns = (runs, b64) => {
+      const bytes = b64ToU8(b64);
+      let o = 0;
+      for (const [w, off, len] of runs) { area(w).set(bytes.subarray(o, o + len), off); o += len; }
+    };
+
+    // ---- Memory cards ----
+    // Slot 1 is the core's save RAM (EmulatorJS's .srm file); slot 2 is a file the
+    // core keeps in its save directory.
+    Emu.saveFiles = () => {
+      try { gm().saveSaveFiles(); } catch {}
+      const out = {};
+      const walk = (dir) => {
+        let names = [];
+        try { names = gm().FS.readdir(dir); } catch { return; }
+        for (const n of names) {
+          if (n === '.' || n === '..') continue;
+          const p = dir + '/' + n;
+          let st; try { st = gm().FS.stat(p); } catch { continue; }
+          if (gm().FS.isDir(st.mode)) walk(p); else out[p] = st.size;
+        }
+      };
+      walk('/data/saves');
+      return out;
+    };
+    Emu.readFile = (p) => { try { return u8ToB64(gm().FS.readFile(p)); } catch { return null; } };
+    Emu.writeFile = (p, b64) => {
+      const dir = p.slice(0, p.lastIndexOf('/'));
+      try { gm().FS.mkdirTree ? gm().FS.mkdirTree(dir) : gm().FS.mkdir(dir); } catch {}
+      gm().FS.writeFile(p, b64ToU8(b64));
+    };
+    Emu.saveFilePath = () => gm().getSaveFilePath();
+    Emu.loadSaveFiles = () => gm().loadSaveFiles();
+
+    // Boot the emulator.
+    const s = document.createElement('script');
+    s.src = '../data/loader.js';
+    document.body.appendChild(s);
+  })();
+  </script>
+</body>
+</html>

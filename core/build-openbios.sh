@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Rebuild data/bios/openbios.bin from PCSX-Redux's OpenBIOS (MIT licence).
-# Needs a mipsel GCC (mipsel-none-elf-gcc, or gcc-mipsel-linux-gnu on Debian/Ubuntu)
+# Needs a mipsel GCC and G++ (mipsel-none-elf-gcc, or gcc-mipsel-linux-gnu and
+# g++-mipsel-linux-gnu on Debian/Ubuntu)
 # and make. Usage: core/build-openbios.sh [git ref of pcsx-redux/nugget]
 set -euo pipefail
 REF="${1:-main}"

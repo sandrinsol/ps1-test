@@ -1,0 +1,56 @@
+name: core
+
+# Rebuilds the patched pcsx_rearmed core and OpenBIOS from source, so the
+# binaries committed in data/ can be checked against core/ (and replaced with
+# the uploaded artifacts when the sources change).
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['core/**', '.github/workflows/core.yml']
+  push:
+    branches: [main]
+    paths: ['core/**', '.github/workflows/core.yml']
+
+jobs:
+  pcsx_rearmed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y p7zip-full
+      - name: Committed checksums
+        run: cp data/cores/reports/pcsx_rearmed-ps1test.json /tmp/committed.json
+      - run: core/build-core.sh "$RUNNER_TEMP/core"
+      - name: Compare with the committed core
+        run: |
+          python3 - <<'PY'
+          import json
+          a = json.load(open('/tmp/committed.json'))['sha256']
+          b = json.load(open('data/cores/reports/pcsx_rearmed-ps1test.json'))['sha256']
+          for k in a:
+              print(f"{k}: committed {a[k]}  built {b[k]}  {'same' if a[k] == b[k] else 'DIFFERENT'}")
+          if a != b:
+              # Emscripten builds aren't bit-identical across machines, so this is a
+              # note, not a failure; when core/ changes, commit this job's artifact.
+              print('::notice::the rebuilt core differs byte-wise from data/cores (expected across machines); if core/ changed, commit the artifact')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pcsx_rearmed-ps1test
+          path: |
+            data/cores/pcsx_rearmed-wasm.data
+            data/cores/pcsx_rearmed-legacy-wasm.data
+            data/cores/reports/pcsx_rearmed-ps1test.json
+
+  openbios:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu g++-mipsel-linux-gnu
+      - name: Rebuild at the committed commit
+        run: core/build-openbios.sh "$(python3 -c "import json; print(json.load(open('data/bios/openbios.json'))['commit'])")"
+      - name: Compare
+        run: git diff --stat --exit-code -- data/bios/openbios.bin || echo "::warning::OpenBIOS rebuild differs from the committed image"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openbios
+          path: data/bios/

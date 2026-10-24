@@ -6,8 +6,12 @@ and builds on the following software:
 - **EmulatorJS** — the emulator frontend in `data/` (loader, UI, compression helpers).
   GPL-3.0. https://github.com/EmulatorJS/EmulatorJS
 - **PCSX-ReARMed** (libretro core, WebAssembly, `data/cores/pcsx_rearmed-*.data`) —
-  runs the PlayStation. GPL-2.0-or-later (`data/cores/PCSX_REARMED-COPYING`);
-  distributed here as built by EmulatorJS.
+  runs the PlayStation. GPL-2.0-or-later (`data/cores/PCSX_REARMED-COPYING`).
+  Built from EmulatorJS's fork (commit `f29871d`, linked with EmulatorJS's RetroArch
+  fork `6dd43539`, as EmulatorJS 4.2.3's own core) with this repo's patch
+  `core/pcsx_rearmed-ps1test.patch` (a GPU command / CPU exception log and memory
+  pointers for the test harness), by `core/build-core.sh`; build details and
+  checksums in `data/cores/reports/pcsx_rearmed-ps1test.json`.
   https://github.com/libretro/pcsx_rearmed, https://github.com/EmulatorJS/pcsx_rearmed
 - **OpenBIOS** (`data/bios/openbios.bin`) — a free replacement for the PlayStation
   BIOS from the PCSX-Redux project, built from source with `core/build-openbios.sh`

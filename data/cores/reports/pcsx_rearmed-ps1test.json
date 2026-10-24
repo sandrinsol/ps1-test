@@ -1,0 +1,11 @@
+{
+  "core": "pcsx_rearmed",
+  "pcsx_rearmed": "f29871d",
+  "patch": "core/pcsx_rearmed-ps1test.patch",
+  "retroarch": "6dd43539",
+  "emscripten": "3.1.74",
+  "sha256": {
+    "wasm": "fee0ef38479e39aa307065d3260ef4f0215df04de75ffffa6d18fdd727cc01bc",
+    "legacy-wasm": "58e05c17a937cf3ea17dcd9f92736fcd43d96049aca41736d2033a183385de40"
+  }
+}

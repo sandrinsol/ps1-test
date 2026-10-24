@@ -1,0 +1,11 @@
+{
+  "rom": "tests/fixtures/hello.exe",
+  "steps": [
+    { "wait": 60 },
+    { "assert": "../goldens/hello-boot.png", "name": "boot" },
+    { "hold": "RIGHT", "frames": 30 },
+    { "assertRam": "box_x", "as": "u16", "equals": 174 },
+    { "tap": "CROSS" },
+    { "assert": "../goldens/hello-moved.png", "name": "moved" }
+  ]
+}

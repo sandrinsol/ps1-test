@@ -1,0 +1,44 @@
+{
+  "name": "ps1-test-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server + headless harness to test PlayStation (PS1) games and homebrew in EmulatorJS (pcsx_rearmed): input, analog sticks, screenshots, save states, deterministic playback, RAM/VRAM read/write, memory cards — no third-party emulator.",
+  "keywords": [
+    "mcp",
+    "ps1",
+    "psx",
+    "playstation",
+    "emulator",
+    "pcsx",
+    "pcsx_rearmed",
+    "emulatorjs",
+    "testing",
+    "homebrew",
+    "psn00bsdk",
+    "ai",
+    "game-testing"
+  ],
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "scripts": {
+    "mcp": "node mcp-server.mjs",
+    "typecheck": "tsc -p .",
+    "postinstall": "playwright install chromium",
+    "shot": "node driver.mjs shot",
+    "run-script": "node runner.mjs",
+    "test": "node tests/run-all.mjs",
+    "fixtures": "node tests/fixtures/build.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "playwright": "^1.48.0",
+    "zod": "^4.5.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}
