@@ -1,6 +1,6 @@
 {
   "name": "ps1-test-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server + headless harness to test PlayStation (PS1) games and homebrew in EmulatorJS (pcsx_rearmed + OpenBIOS): input, analog sticks, screenshots, save states, deterministic playback, RAM/VRAM read/write, GPU command capture, memory cards, cheats — no third-party emulator.",
   "keywords": ["mcp", "ps1", "psx", "playstation", "emulator", "pcsx", "pcsx_rearmed", "emulatorjs", "testing", "ai", "game-testing", "homebrew", "psn00bsdk"],
   "license": "GPL-3.0-or-later",
