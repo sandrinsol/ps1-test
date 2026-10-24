@@ -479,14 +479,14 @@ export class EmuHarness {
   async debugOff() {
     if (!this.live) return;
     this._state = null;
-    await this.page.evaluate(async () => { await window.Emu.dbgFinishFrame(); window.Emu.dbgOff(); });
+    await this.page.evaluate(async () => { window.Emu.dbgDisarm(); await window.Emu.dbgFinishFrame(); window.Emu.dbgOff(); });
   }
   /** { halted, partial, total, hits: [{ kind, pc, addr, size, value, old, ra, sp,
    *  cycle, index, args: [v0, a0..a3], code }], regs: { pc, r[32], lo, hi, sr,
-   *  cause, epc, badVaddr, cycle } } */
-  async debugState() {
+   *  cause, epc, badVaddr, cycle } }. clear: forget the hits after reading them. */
+  async debugState({ clear = false } = {}) {
     this._needDebugger();
-    const st = await this.page.evaluate(() => window.Emu.dbgState());
+    const st = await this.page.evaluate((c) => { const s = window.Emu.dbgState(); if (c) window.Emu.dbgClearHits(); return s; }, clear);
     const KIND = { 1: 'exec', 2: 'read', 4: 'write' };
     const r = st.regs;
     return {
@@ -495,7 +495,8 @@ export class EmuHarness {
       regs: { r: r.slice(0, 32), lo: r[32], hi: r[33], pc: r[34], sr: r[35], cause: r[36], epc: r[37], badVaddr: r[38], cycle: r[39] },
     };
   }
-  /** While halted: execute up to n instructions → how many ran (stops on a hit). */
+  /** While halted mid-frame: execute up to n instructions → how many ran (stops
+   *  on a hit). Throws when not halted. */
   async debugStep(n = 1) {
     this._needDebugger();
     this._state = null;

@@ -1,6 +1,7 @@
 // Unit tests that need no emulator: PS-EXE parsing, ELF → EXE, the disc
 // builder (ISO 9660 + Mode 2 sectors with EDC), the zip writer, symbols,
-// build-output parsing, and memory-card formats.
+// build-output parsing, memory-card formats, and the debugger's disassembler,
+// call stack and profile grouping.
 //
 //   node tests/unit.mjs
 
@@ -19,6 +20,8 @@ import { encodeVag, decodeAdpcm, encodeWav16, vagFile, readVag, makeTable, conve
 import { convertTilemap, writeTilemap } from '../tilemap.mjs';
 import { encodePng, decodePng } from '../png.mjs';
 import { RunChecker } from '../checks.mjs';
+import { disasm, isReturnAddress } from '../mips.mjs';
+import { listing, callStack, profileByFunction } from '../debugger.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp } from 'node:fs/promises';
@@ -224,6 +227,47 @@ ok('decodeLog: exception', dec.exceptions[0]?.code === 4 && dec.exceptions[0].ba
   const c = new RunChecker({ symbols: { nameOf: () => '__bswapsi2' } });
   c.observe({ regions: { gpuStatus: 0, gpuControl: Buffer.alloc(1024), vram: Buffer.alloc(1024 * 1024) }, cpu: { pc: 0x80010000, sp: 0x801fff00 }, cap: { exceptions: [{ code: 10, epc: 0x80010980, badVaddr: 0 }], prims: [], chains: [], env: { drawArea: { x0: 0, y0: 0, x1: 319, y1: 239 } } } });
   ok('check explains an RI exception in a compiler helper', c.findings().some((f) => /reserved instruction.*__bswapsi2.*MIPS32r2/.test(f.msg)));
+}
+
+// ---- Debugger: disassembler, call stack, profile ----
+{
+  const d = (w, pc = 0x80010000, name) => disasm(w, pc, name).text;
+  ok('disasm: addiu/li/lui/ori', d(0x27bdffe8) === 'addiu sp, sp, -0x18' && d(0x24020005) === 'li v0, 0x5' && d(0x3c031f80) === 'lui v1, 0x1f80' && d(0x34420001) === 'ori v0, v0, 0x1');
+  ok('disasm: loads and stores', d(0x8fbf0014) === 'lw ra, 0x14(sp)' && d(0xafbf0014) === 'sw ra, 0x14(sp)' && d(0x94621044) === 'lhu v0, 0x1044(v1)' && d(0xa082fffc) === 'sb v0, -0x4(a0)');
+  ok('disasm: R-type, move, nop', d(0x00851021) === 'addu v0, a0, a1' && d(0x00801021) === 'move v0, a0' && d(0) === 'nop' && d(0x00021080) === 'sll v0, v0, 2');
+  ok('disasm: jal names its target', d(0x0c004038, 0x80010030, (a) => (a === 0x800100e0 ? 'main' : null)) === 'jal 0x800100e0 <main>');
+  const b = disasm(0x1040fffc, 0x80010054);
+  ok('disasm: branch target', b.text === 'beq v0, zero, 0x80010048' && b.target === 0x80010048 && b.isBranch);
+  ok('disasm: b, jr, jalr', d(0x1000ffff, 0x80010038) === 'b 0x80010038' && d(0x03e00008) === 'jr ra' && d(0x0040f809) === 'jalr v0');
+  ok('disasm: COP0 and GTE', d(0x42000010) === 'rfe' && d(0x40026000) === 'mfc0 v0, $12' && d(0x4a280030) === 'rtpt' && d(0x4a180001) === 'rtps' && d(0x48c20800) === 'ctc2 v0, $1');
+  ok('disasm: unknown word', d(0xfc000000) === '.word 0xfc000000');
+  ok('return address: jal / jalr / bgezal yes, j no', isReturnAddress(0x0c004038) && isReturnAddress(0x0040f809) && isReturnAddress(0x04110003) && !isReturnAddress(0x08004038));
+  const L = listing(Buffer.from([0x08, 0x00, 0xe0, 0x03, 0, 0, 0, 0]), 0x80010100, { mark: 0x80010100, name: (a) => (a === 0x80010100 ? 'f' : null) });
+  ok('listing marks the pc', L[0] === '> 80010100 <f>  03e00008  jr ra' && L[1] === '  80010104  00000000  nop', L.join(' | '));
+
+  // main (0x80010100) calls f (0x80010200) with jal at 0x80010120, which calls g
+  // (0x80010300) with jal at 0x80010210; a stale word on the stack points just
+  // past a call to some other function.
+  /** @type {[string, number][]} */
+  const syms = [['main', 0x80010100], ['f', 0x80010200], ['g', 0x80010300], ['h', 0x80010400]];
+  /** @param {number} a @returns {string | null} */
+  const name = (a) => { const s = syms.find(([, s0]) => a >= s0 && a < s0 + 0x100); return s ? (a === s[1] ? s[0] : `${s[0]}+${a - s[1]}`) : null; };
+  const code = new Map([[0x80010120, 0x0c000000 | (0x80010200 >>> 2 & 0x3ffffff)], [0x80010210, 0x0c000000 | (0x80010300 >>> 2 & 0x3ffffff)], [0x80010130, 0x0c000000 | (0x80010400 >>> 2 & 0x3ffffff)]]);
+  const word = (a) => code.get(a) ?? 0;
+  const stack = Buffer.alloc(32);
+  stack.writeUInt32LE(0x80010138, 4);   // stale: after the call to h
+  stack.writeUInt32LE(0x80010218, 12);  // f's saved ra → back into f after calling g
+  stack.writeUInt32LE(0x12345678, 16);
+  stack.writeUInt32LE(0x80010128, 28);  // main's call to f
+  const cs = callStack({ pc: 0x80010310, ra: 0x80010218, sp: 0x801fff00, stack, word, name });
+  ok('call stack: verified return addresses only, stale ones skipped', cs.map((f) => f.at).join(' ← ') === 'g+16 ← f+24 ← main+40', cs.map((f) => f.at).join(' ← '));
+  const leaf = callStack({ pc: 0x80010304, ra: 0x80010218, sp: 0x801fff00, stack: Buffer.alloc(0), word, name });
+  ok('call stack: a leaf\'s caller from ra', leaf.length === 2 && leaf[1].at === 'f+24' && leaf[1].via === 'ra');
+
+  const p = profileByFunction([0x80010104, 0x80010104, 0x80010108, 0x80010204, 0xbfc00100, 0x80001000], name);
+  ok('profile: grouped by function, most first', p.total === 6 && p.funcs[0].name === 'main' && p.funcs[0].count === 3 && Math.round(p.funcs[0].pct) === 50);
+  ok('profile: hot spots inside a function', p.funcs[0].hot[0].addr === 0x80010104 && p.funcs[0].hot[0].count === 2);
+  ok('profile: BIOS and kernel without symbols', p.funcs.some((f) => f.name === '(BIOS ROM)') && p.funcs.some((f) => f.name === '(kernel)'));
 }
 
 done();

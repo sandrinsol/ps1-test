@@ -647,6 +647,9 @@
       b[DBG.FLAGS] = (exec.length ? 1 : 0) | (watch.length ? 2 : 0) | (c.profile ? 4 : 0) | (c.halt ? 8 : 0);
       Emu._dbgActive = b[DBG.FLAGS] !== 0;
     };
+    /** Disarm breakpoints, watchpoints and the profiler, staying halted (so a
+     *  halted frame can then finish without stopping again). */
+    Emu.dbgDisarm = () => { if (Emu.hasDebugger()) dbgBlock()[DBG.FLAGS] = 0; };
     Emu.dbgOff = () => {
       if (!Emu.hasDebugger()) return;
       const b = dbgBlock();
@@ -686,7 +689,12 @@
       };
     };
     /** Execute up to n instructions while halted; → how many ran. */
-    Emu.dbgStep = (n) => { const r = M()._ps1test_step(n); Emu._fbValid = false; return r; };
+    Emu.dbgStep = (n) => {
+      if (!Emu._partial) throw new Error('not halted: run with a breakpoint or watchpoint and halt first');
+      const r = M()._ps1test_step(n); Emu._fbValid = false; return r;
+    };
+    /** Forget the hits recorded so far (the next one is hits[0]). */
+    Emu.dbgClearHits = () => { dbgBlock()[DBG.NHITS] = 0; };
     /** Profiler samples (pc values) as base64 of LE u32s. */
     Emu.profRead = () => {
       const n = dbgBlock()[DBG.PROF_N], p = M()._ps1test_prof_buf();

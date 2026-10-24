@@ -55,14 +55,15 @@ Link small assets with `psn00bsdk_target_incbin`; put large ones on the disc
 
 | Symptom | Look with | Usual cause |
 |---|---|---|
+| A variable gets a wrong value | `debug` with `watch` on it (`halt: false` lists every writer; `halt` stops at the first) | Buffer overrun from a neighbouring array, a stray pointer, a missing `volatile` on a value an interrupt changes |
 | Black screen | `describe`, `check` | Display never enabled (`SetDispMask(1)`), DISPENV pointing at an empty buffer, crashed before the first frame (exception) |
 | Stuck in the BIOS / boot screen | `check`, `read_cpu` | Disc not bootable (`SYSTEM.CNF`, EXE name) — `build`/`check` report it; EXE loads below 0x80010000 |
-| Crash, freeze | `check` (exception + function), `read_cpu` | Unaligned access (packed struct, `char*` cast to `int*`), null pointer, reserved instruction (MIPS32 code from the wrong libgcc), stack overflow |
+| Crash, freeze | `check` (exception + function), `read_cpu`, `debug` (break before the crash, `step`) | Unaligned access (packed struct, `char*` cast to `int*`), null pointer, reserved instruction (MIPS32 code from the wrong libgcc), stack overflow |
 | Sprite missing | `gpu_capture`, `view_vram gpu:true` | Never added to the OT, off-screen or outside the drawing area, CLUT all zero (not uploaded), texture page not set (sprites use the last E1), wrong colour depth |
 | Garbage texture | `view_vram`, `texture` export | Texture crosses a 64-word page boundary, uploaded over a framebuffer, UVs not relative to the page |
 | Flicker / half-drawn frame | `gpu_capture` | Drawing into the displayed buffer (DrawSync/VSync/swap order), primitive buffer overflow |
 | Giant/missing polygons | `check` | Polygon over 1023×511 (GTE values overflowed, vertex behind the camera not culled) |
-| Slowdown | `check` with the frame counter, `describe` `cpu_usage` | See `ps1-performance` |
+| Slowdown | `check` with the frame counter, `describe` `cpu_usage`, `profile` | See `ps1-performance` |
 | No sound | `read_memory` 0x1F801DAA (SPUCNT), `check` | SPU not initialised, sample uploaded below 0x1010 or not 8-byte aligned, volume 0, KON not written |
 | Input ignored | `describe`, pad buffer in `read_memory` | Reading before the BIOS fills the buffer (type 0), buttons are active-low, analog fields read on a digital pad |
 | Save fails | `memory_card list` | Card not formatted, filename/region prefix wrong, title frame missing |

@@ -22,6 +22,10 @@ either side doesn't finish in time.
 - `describe` with `watch` on `cpu_usage` shows the cost of each action as you play.
 - Time sections: read `TIMER_VALUE(1)` (scanlines) before and after into globals
   (`t_ai`, `t_draw`) and `read_memory` them.
+- `profile` with `frames` over the slow part: the share of CPU time per function
+  and its hottest instructions. Time in the VSync wait (or the kernel at
+  0x80000080) is idle time; the rest is your frame's work. Use it before
+  optimising anything, then again to confirm the fix.
 - CPU low but still lagging → the GPU is the bottleneck: measure the time spent in
   `DrawSync(0)` the same way; `gpu_capture` shows how many and how big the
   primitives are.

@@ -11,6 +11,7 @@
 //   find     ram_search
 //   make     texture (PNG ↔ TIM, into VRAM), background (maps → tileset + map), data (VAG sound, tables, meshes)
 //   develop  build (compile + reload), check (hardware rules), new_project
+//   debug    debug (breakpoints, watchpoints, step, disassembly, call stack), profile
 // Addresses can be symbol names when there is a symbol file (.elf/.map/.sym).
 // A ps1test.json in the workspace sets project defaults (build, rom, bios, watch).
 // The machine is paused between calls, so every read lands on an exact frame.
@@ -48,6 +49,8 @@ import { convertTilemap, writeTilemap, renderTiledMap } from './tilemap.mjs';
 import { encodeVag, writeSound, makeTable, writeTable, convertMesh, writeMesh } from './gamedata.mjs';
 import { vramImage, outline } from './gpu.mjs';
 import { encodePng } from './png.mjs';
+import { REG_NAMES } from './mips.mjs';
+import { listing, callStack, profileByFunction } from './debugger.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(__dirname, 'out');
@@ -1010,6 +1013,131 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
     const errs = found.filter((f) => f.level === 'error').length, warns = found.filter((f) => f.level === 'warn').length;
     const head = `${errs ? `${errs} error(s)` : 'No errors'}, ${warns} warning(s) over ${frames} frames${counterAddr === null ? counterNote || ' (no frame counter: lag not checked)' : ` (frame counter ${label(counterAddr)})`}; state restored.`;
     return result([head, ...found.map((f) => `${f.level === 'ok' || f.level === 'info' ? f.level : f.level.toUpperCase()}: ${f.msg}`)].join('\n'), { errors: errs, warnings: warns });
+  });
+
+  // ---- Debug (instrumented core) ----
+  const nameFn = (a, o) => emu.symbols?.nameOf(a, o) ?? null;
+  const at = (a) => { const n = nameFn(a, { maxOffset: 0x10000 }); return n ? `${hex(a)} (${n})` : hex(a); };
+  const word = (b, o) => b.readUInt32LE(o);
+  /** Registers as 4 lines of 8, pc/sr/cause/epc first. */
+  const regLines = (r) => {
+    const h = (n) => (n >>> 0).toString(16).padStart(8, '0');
+    const lines = [`pc=${h(r.pc)} hi=${h(r.hi)} lo=${h(r.lo)} sr=${h(r.sr)} cause=${h(r.cause)} epc=${h(r.epc)}`];
+    for (let i = 0; i < 32; i += 8) lines.push(REG_NAMES.slice(i, i + 8).map((n, k) => `${n}=${h(r.r[i + k])}`).join(' '));
+    return lines;
+  };
+  async function disasmAt(addr, count, mark) {
+    return listing(await emu.readMemory(addr >>> 0, count * 4), addr >>> 0, { mark, name: nameFn });
+  }
+  async function stackOf(regs) {
+    const sp = regs.r[29] >>> 0, ram = ((sp & 0x1fffffff) >>> 0) < 0x200000;
+    const stack = ram ? await emu.readMemory(sp, Math.max(0, Math.min(0x800, 0x200000 - ((sp & 0x1fffffff) >>> 0)))) : Buffer.alloc(0);
+    const words = new Map();
+    for (const f of [regs.r[31], ...Array.from({ length: stack.length >> 2 }, (_, i) => stack.readUInt32LE(i * 4))]) {
+      const a = (f - 8) >>> 0;
+      if (((a & 0x1fffffff) >>> 0) < 0x200000 && !(a & 3) && !words.has(a)) words.set(a, word(await emu.readMemory(a, 4), 0));
+    }
+    return callStack({ pc: regs.pc, ra: regs.r[31], sp, stack, word: (a) => words.get(a >>> 0) ?? null, name: nameFn });
+  }
+  const stackLine = (frames) => 'stack: ' + frames.map((f) => f.at ?? hex(f.addr)).join(' ← ');
+  /** "write to frame_count by main+908: 0x45 → 0x46". */
+  const hitText = (hit) => hit.kind === 'exec' ? `breakpoint ${at(hit.pc)}`
+    : `${hit.kind} ${hit.kind === 'write' ? 'to' : 'of'} ${at(hit.addr)} by ${nameFn(hit.pc, { maxOffset: 0x10000 }) ?? hex(hit.pc)}: ${hit.size} byte(s) ${hit.kind === 'write' ? `${hex(hit.old)} → ${hex(hit.value)}` : hex(hit.value)}`;
+  async function haltReport(st, head) {
+    const pc = st.regs.pc >>> 0;
+    const frames = await stackOf(st.regs);
+    return [head, ...(await disasmAt(pc - 16, 9, pc)), stackLine(frames), ...regLines(st.regs)].join('\n');
+  }
+
+  tool('debug', {
+    description: 'Breakpoints and watchpoints (CPU loads/stores). run: arm, run `frames`; halt stops mid-frame at the first hit (disassembly, call stack, registers), else hits are listed. Then step/continue/state/disasm; off clears.',
+    inputSchema: {
+      action: z.enum(['run', 'continue', 'step', 'state', 'disasm', 'off']).default('run'),
+      break: z.array(Address).max(16).optional(),
+      watch: z.array(z.object({
+        address: Address, length: z.number().int().min(1).max(0x200000).default(4),
+        on: z.enum(['write', 'read', 'access']).default('write'), changed: z.boolean().optional().describe('writes that change it'),
+        op: z.enum(['eq', 'ne', 'lt', 'gt', 'lte', 'gte']).optional(), value: z.number().int().optional(),
+      })).max(16).optional(),
+      halt: z.boolean().default(true),
+      frames: z.number().int().min(1).max(3600).default(60),
+      count: z.number().int().min(1).max(10000).optional().describe('step: instructions (1); disasm: lines (16)'),
+      address: Address.optional().describe('disasm start (default around pc)'),
+    },
+  }, async ({ action, break: exec = [], watch = [], halt, frames, count, address }) => {
+    if (!emu.live) return errText('debug needs the bundled ps1-test core');
+    if (action === 'off') {
+      await emu.debugOff();
+      return result(`Debugger off. Frame ${await emu.frameNum()}.`);
+    }
+    if (action === 'disasm') {
+      const st = await emu.debugState();
+      const pc = st.regs.pc >>> 0, n = count ?? 16;
+      const from = address !== undefined ? emu.addr(address) : pc - 4 * Math.min(4, n >> 2);
+      return result((await disasmAt(from & ~3, n, pc)).join('\n'));
+    }
+    if (action === 'state') {
+      const st = await emu.debugState();
+      const where = st.partial ? `Halted mid-frame ${await emu.frameNum()}` : `Frame ${await emu.frameNum()} (between frames)`;
+      return result(await haltReport(st, `${where}, pc ${at(st.regs.pc)}.`), { halted: st.partial, pc: st.regs.pc });
+    }
+    if (action === 'step') {
+      const before = await emu.debugState();
+      if (!before.partial) return errText('step needs a halt: debug run with a breakpoint or watchpoint first');
+      const ran = await emu.debugStep(count ?? 1);
+      const st = await emu.debugState({ clear: true });
+      const changed = REG_NAMES.map((n, i) => (st.regs.r[i] !== before.regs.r[i] ? `${n}=${hex(st.regs.r[i])}` : null)).filter(Boolean);
+      const hit = st.hits.length ? `; stopped on ${hitText(st.hits[st.hits.length - 1])}` : '';
+      return result(`Ran ${ran} instruction(s)${hit}; pc ${at(st.regs.pc)}. Changed: ${changed.join(' ') || 'none'}.\n${(await disasmAt((st.regs.pc >>> 0) - 8, 6, st.regs.pc)).join('\n')}`, { ran, pc: st.regs.pc });
+    }
+    const f0 = await emu.frameNum();
+    if (action === 'run') {
+      if (!exec.length && !watch.length) return errText('give `break` and/or `watch`');
+      await emu.debugSet({ exec, watch, halt, maxHits: 256 });
+    } else await emu.debugState({ clear: true });
+    await emu.waitFrames(frames);
+    const st = await emu.debugState({ clear: true });
+    const f1 = await emu.frameNum();
+    record({ wait: f1 - f0 });
+    if (st.partial) {
+      const hit = st.hits[st.hits.length - 1];
+      const text = await haltReport(st, `Halted mid-frame ${f1} on ${hit ? hitText(hit) : 'a hit'}.\nNext: step, continue (keeps the points armed) or off; until off, other tools that run frames also stop at hits.`);
+      return result(text, { halted: true, frame: f1, pc: st.regs.pc });
+    }
+    if (halt || action === 'continue') return result(`No hit in ${frames} frames; frame ${f1}.${action === 'run' ? ' Still armed: continue runs on, off clears.' : ''}`, { halted: false, frame: f1 });
+    if (!halt) await emu.debugOff();
+    // Logged hits, grouped by what and where.
+    const groups = new Map();
+    for (const h of st.hits) {
+      const k = `${h.kind} ${h.addr} ${h.pc}`;
+      const g = groups.get(k);
+      if (g) { g.n++; g.last = h; } else groups.set(k, { n: 1, first: h, last: h });
+    }
+    const lines = [...groups.values()].map((g) => `${g.n}× ${hitText(g.last)}${g.last.kind === 'exec' ? ` (ra ${at(g.last.ra)}, a0=${hex(g.last.args[1])})` : ''}`);
+    const more = st.total > st.hits.length ? ` (first ${st.hits.length} recorded)` : '';
+    return result(`${st.total} hit(s) in frames ${f0}-${f1}${more}:\n${lines.join('\n') || 'none'}${await watchLine()}`, { hits: st.total, frame: f1 });
+  });
+
+  tool('profile', {
+    description: 'Sample the CPU pc over `frames` frames → time per function (with hot spots), from symbols. Needs the bundled core.',
+    inputSchema: {
+      frames: z.number().int().min(1).max(3600).default(60),
+      interval: z.number().int().min(16).max(1 << 20).optional().describe('cycles between samples (default: ~500k samples)'),
+      top: z.number().int().min(1).max(100).default(15),
+    },
+  }, async ({ frames, interval, top }) => {
+    if (!emu.live) return errText('profile needs the bundled ps1-test core');
+    const cyclesPerFrame = emu.options.region === 'pal' ? 677376 : 564480;
+    interval ??= Math.max(64, Math.ceil((frames * cyclesPerFrame) / 500000));
+    const f0 = await emu.frameNum();
+    const p = await emu.profile(frames, { interval });
+    record({ wait: (await emu.frameNum()) - f0 });
+    const r = profileByFunction(p.samples, nameFn);
+    const lines = r.funcs.slice(0, top).map((f) => `${f.pct.toFixed(1).padStart(5)}%  ${f.name}  (hot: ${f.hot.map((x) => `${nameFn(x.addr) ?? hex(x.addr)} ${((x.count * 100) / r.total).toFixed(1)}%`).join(', ')})`);
+    const more = r.funcs.length > top ? `\n… ${r.funcs.length - top} more function(s)` : '';
+    const sym = emu.symbols ? '' : '\n(no symbols: grouped by address; give load_disc a .elf/.map for names)';
+    return result(`${r.total} samples every ${interval} cycles over ${frames} frames${p.full ? ' (buffer full: later frames not sampled)' : ''}:\n${lines.join('\n')}${more}${sym}`,
+      { samples: r.total, top: r.funcs[0]?.name ?? null });
   });
 
   // ---- Status ----
