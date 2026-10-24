@@ -2,7 +2,7 @@
 
 A small working PlayStation game to start from: text on screen, a 16x16 player
 you move with the D-pad (or the left stick of an analog pad), a cube spun by the
-GTE, and a test that checks it.
+GTE, a sound effect on Cross, and a test that checks it.
 
 | | |
 |---|---|
@@ -18,7 +18,16 @@ GTE, and a test that checks it.
   768,256), linked in with `psn00bsdk_target_incbin`. Regenerate it with the MCP
   `texture` tool: `convert` with `png: "assets/player.png", out: "assets/player.tim",
   depth: 4, x: 768, y: 0, clutX: 768, clutY: 256`.
+- `assets/blip.wav` → `assets/blip.vag` (SPU ADPCM, 22050 Hz), uploaded to SPU RAM
+  at start and played on voice 0. Regenerate it with the MCP `data` tool:
+  `kind: "sound", wav: "assets/blip.wav", out: "assets/blip.vag"`.
 - `iso.xml` + `system.cnf`: the disc layout for `mkpsxiso`.
+
+With `mipsel-linux-gnu`, the template also compiles `src/libgcc_mips1.c`: that
+toolchain's libgcc is built for MIPS32r2, whose extra instructions crash the PS1's
+MIPS I CPU (a "reserved instruction" exception the moment the game byte-swaps or
+does 64-bit math), so the file provides those helpers in plain C. Floating point
+isn't covered: avoid `float`/`double`, or use a `mipsel-none-elf` toolchain.
 
 `.devcontainer/install-psn00bsdk.sh` builds PSn00bSDK for Ubuntu's
 `mipsel-linux-gnu` toolchain, with a small fix to its `elf2x` tool

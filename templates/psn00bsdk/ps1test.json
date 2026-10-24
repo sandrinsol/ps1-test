@@ -3,7 +3,7 @@
   "rom": "build/game.cue",
   "symbols": "build/game.elf",
   "bios": "openbios",
-  "watch": ["player_x:s16", "player_y:s16"],
+  "watch": ["player_x:s16", "player_y:s16", "sounds_played:u32"],
   "frameCounter": "frame_count",
   "cpuUsage": "cpu_usage"
 }

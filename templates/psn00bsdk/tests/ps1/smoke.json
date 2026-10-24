@@ -8,6 +8,8 @@
     { "assertRam": "player_x", "as": "s16", "equals": 192 },
     { "hold": "UP", "frames": 10 },
     { "assertRam": "player_y", "as": "s16", "equals": 140 },
-    { "assert": "goldens/moved.png", "ignore": [{ "x": 16, "y": 32, "w": 288, "h": 8 }] }
+    { "assert": "goldens/moved.png", "ignore": [{ "x": 16, "y": 32, "w": 288, "h": 8 }] },
+    { "tap": "CROSS" },
+    { "assertRam": "sounds_played", "as": "u32", "equals": 1 }
   ]
 }

@@ -14,6 +14,11 @@ import { rawCard } from '../driver.mjs';
 import { formatCard, listSaves } from '../mcard.mjs';
 import { exeIssues, discIssues } from '../checks.mjs';
 import { decodeLog } from '../gpu.mjs';
+import { convertTim, readTim, timToPng, timToC } from '../tim.mjs';
+import { encodeVag, decodeAdpcm, encodeWav16, vagFile, readVag, makeTable, convertMesh, writeMesh, decodeWav } from '../gamedata.mjs';
+import { convertTilemap, writeTilemap } from '../tilemap.mjs';
+import { encodePng, decodePng } from '../png.mjs';
+import { RunChecker } from '../checks.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp } from 'node:fs/promises';
@@ -150,5 +155,75 @@ ok('decodeLog: quad with the draw offset applied', dec.prims[0]?.kind === 'poly4
 ok('decodeLog: chain packet address', dec.prims[0].addr === 0x80020004 + 4 && dec.chains[0] === 0x80020000, dec.prims[0].addr.toString(16));
 ok('decodeLog: CPU-written fill reassembled from single words', dec.prims[1]?.kind === 'fill' && dec.prims[1].size[0] === 16);
 ok('decodeLog: exception', dec.exceptions[0]?.code === 4 && dec.exceptions[0].badVaddr === 0x80010002);
+
+// ---- TIM ----
+{
+  const W = 8, H = 4, data = new Uint8Array(W * H * 4);
+  for (let i = 0; i < W * H; i++) data.set(i % 3 === 0 ? [0, 0, 0, 0] : i % 3 === 1 ? [255, 0, 0, 255] : [0, 0, 0, 255], i * 4);
+  const pngIn = encodePng({ width: W, height: H, channels: 4, data });
+  const t4 = convertTim(pngIn, { depth: 4, x: 640, y: 0, clutX: 640, clutY: 480 });
+  const r4 = readTim(t4.tim);
+  ok('TIM 4-bit: header, CLUT and image blocks', r4.depth === 4 && r4.clut.x === 640 && r4.clut.y === 480 && r4.image.w === 2 && r4.image.h === 4 && r4.width === 8);
+  ok('TIM: transparent pixels are colour 0, opaque black is 0x8000', r4.clut.colors[0] === 0 && r4.clut.colors.includes(0x8000) && r4.clut.colors.includes(0x001f));
+  const back = decodePng(timToPng(t4.tim));
+  ok('TIM round-trips through PNG', back.width === 8 && back.data[3] === 0 && back.data[7] === 255 && back.data[4] === 255);
+  const t16 = readTim(convertTim(pngIn, { depth: 16, x: 0, y: 0 }).tim);
+  ok('TIM 16-bit has no CLUT', t16.depth === 16 && !t16.clut && t16.image.w === 8);
+  let thrown = '';
+  try { convertTim(pngIn, { depth: 4, x: 1023 }); } catch (e) { thrown = e.message; }
+  ok('TIM placement outside VRAM refused', /doesn't fit/.test(thrown), thrown);
+  const many = new Uint8Array(32 * 32 * 4); for (let i = 0; i < 1024; i++) many.set([i & 255, (i >> 2) & 255, 128, 255], i * 4);
+  try { convertTim(encodePng({ width: 32, height: 32, channels: 4, data: many }), { depth: 4 }); thrown = ''; } catch (e) { thrown = e.message; }
+  ok('too many colours for 4-bit needs quantize', /quantize/.test(thrown));
+  ok('quantize reduces to 16 colours', convertTim(encodePng({ width: 32, height: 32, channels: 4, data: many }), { depth: 4, quantize: true }).colors <= 16);
+  ok('TIM as a C array', /const uint32_t player_tim\[\] = \{/.test(timToC(t4.tim, 'player_tim')));
+}
+
+// ---- VAG ----
+{
+  const rate = 22050, n = 11025;
+  const pcm = Int16Array.from({ length: n }, (_, i) => Math.round(Math.sin(2 * Math.PI * 440 * i / rate) * 20000));
+  const v = encodeVag(encodeWav16(pcm, rate), { rate });
+  const d = decodeAdpcm(v.adpcm);
+  let sig = 0, noise = 0;
+  for (let i = 0; i < n; i++) { sig += pcm[i] ** 2; noise += (pcm[i] - d[i + 28]) ** 2; }
+  ok('VAG: SPU ADPCM round trip above 40 dB SNR', 10 * Math.log10(sig / noise) > 40, `${(10 * Math.log10(sig / noise)).toFixed(1)} dB`);
+  ok('VAG: 16-byte blocks, last one flagged end', v.adpcm.length % 16 === 0 && (v.adpcm[v.adpcm.length - 15] & 1) === 1);
+  ok('VAG: pitch for 22050 Hz is 0x800', v.pitch === 0x800);
+  const looped = encodeVag(encodeWav16(pcm, rate), { rate, loop: true });
+  ok('VAG loop: start flag on the first data block, end+repeat on the last', (looped.adpcm[17] & 4) === 4 && (looped.adpcm[looped.adpcm.length - 15] & 3) === 3);
+  const f = readVag(vagFile(v, 'tone'));
+  ok('.vag header round-trips', f.rate === rate && f.name === 'tone' && f.adpcm.equals(v.adpcm));
+  const st = encodeWav16(Int16Array.from([1000, -1000, 2000, -2000]), 8000);
+  ok('WAV decoder', decodeWav(st).samples.length === 4 && decodeWav(st).rate === 8000);
+}
+
+// ---- Tables, meshes, tilemaps ----
+{
+  const sin = makeTable('sin');
+  ok('sin table: 4096 steps, 12 bits', sin.size === 4096 && sin.values[1024] === 4096 && sin.values[0] === 0 && sin.type === 'int16_t');
+  const obj = 'v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nvn 0 0 1\nf 1//1 2//1 3//1 4//1\nf 1 2 3\n';
+  const m = convertMesh(obj, { size: 100 });
+  ok('mesh: scaled to ±size, Y flipped for screen space', m.verts[0][0] === -100 && m.verts[0][1] === 100 && m.verts[2][1] === -100);
+  ok('mesh: quads in GPU order (0,1,3,2)', m.faces[0].v.join() === '0,1,3,2' && m.quads === 1 && m.tris === 1);
+  ok('mesh: normals in 4096 units', m.norms[0][2] === 4096);
+  const mf = path.join(tmp, 'm.c');
+  await writeMesh(m, mf, 'quad');
+  ok('mesh C source', /const SVECTOR quad_verts\[4\]/.test(await readFile(mf, 'utf8')) && /QUAD_QUADS 1/.test(await readFile(mf.replace(/c$/, 'h'), 'utf8')));
+  const W = 64, H = 32, img = new Uint8Array(W * H * 4);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) img.set(((x >> 4) + (y >> 4)) % 2 ? [200, 50, 50, 255] : [50, 50, 200, 255], (y * W + x) * 4);
+  const tm = convertTilemap(encodePng({ width: W, height: H, channels: 4, data: img }), { tile: 16 });
+  ok('tilemap: duplicates merged', tm.tileCount === 2 && tm.cols === 4 && tm.rows === 2 && Array.from(tm.map).join() === '0,1,0,1,1,0,1,0');
+  ok('tilemap preview rebuilds the image', decodePng(tm.preview).width === 64);
+  const files = await writeTilemap(tm, path.join(tmp, 'level.c'), 'level');
+  ok('tilemap writes .c, .h and the tileset .tim', files.length === 3 && readTim(await readFile(path.join(tmp, 'level.tim'))).depth === 4);
+}
+
+// ---- check: a reserved instruction in a libgcc helper gets an explanation ----
+{
+  const c = new RunChecker({ symbols: { nameOf: () => '__bswapsi2' } });
+  c.observe({ regions: { gpuStatus: 0, gpuControl: Buffer.alloc(1024), vram: Buffer.alloc(1024 * 1024) }, cpu: { pc: 0x80010000, sp: 0x801fff00 }, cap: { exceptions: [{ code: 10, epc: 0x80010980, badVaddr: 0 }], prims: [], chains: [], env: { drawArea: { x0: 0, y0: 0, x1: 319, y1: 239 } } } });
+  ok('check explains an RI exception in a compiler helper', c.findings().some((f) => /reserved instruction.*__bswapsi2.*MIPS32r2/.test(f.msg)));
+}
 
 done();

@@ -415,6 +415,17 @@ export class EmuHarness {
     };
   }
 
+  /** Write a w×h rectangle of 16-bit VRAM words at x, y (instrumented core; the
+   *  paused machine sees it at once, the screen on the next frame). */
+  async writeVram(x, y, w, h, data) {
+    if (!this.live) throw new Error('writing VRAM needs the bundled ps1-test core');
+    if (x < 0 || y < 0 || x + w > 1024 || y + h > 512) throw new Error(`rectangle ${x},${y} ${w}x${h} is outside VRAM (1024x512)`);
+    if (data.length < w * h * 2) throw new Error('not enough data for the rectangle');
+    const runs = Array.from({ length: h }, (_, j) => [psxMem.LIVE.vram, ((y + j) * 1024 + x) * 2, w * 2]);
+    this._state = null;
+    await this.page.evaluate(([r, b]) => window.Emu.liveWriteRuns(r, b), [runs, Buffer.from(data).subarray(0, w * h * 2).toString('base64')]);
+  }
+
   // ---- GPU command capture (instrumented core) ----
   /** Run `frames` frames (default 1) with the core logging every GPU command and
    *  CPU exception, and decode it: { prims, env, exceptions, gp1, chains, stats,

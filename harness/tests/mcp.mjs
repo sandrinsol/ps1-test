@@ -36,14 +36,15 @@ try {
   const names = tools.map((t) => t.name);
   const ALL = ['load_disc', 'wait_frames', 'press', 'set_button', 'set_analog', 'wait_until', 'reset', 'screenshot',
     'read_memory', 'read_cpu', 'gpu_capture', 'view_vram', 'describe', 'status', 'write_memory', 'state', 'cheats',
-    'memory_card', 'run_sequence', 'record_video', 'assert_golden', 'export_script', 'ab_compare', 'ram_search', 'build', 'check', 'new_project'];
+    'memory_card', 'run_sequence', 'record_video', 'assert_golden', 'export_script', 'ab_compare', 'ram_search', 'build', 'check', 'new_project',
+    'texture', 'background', 'data'];
   for (const n of ALL) ok(`tool listed: ${n}`, names.includes(n));
   ok('exactly the documented tools', names.length === ALL.length, `${names.length}: ${names.filter((n) => !ALL.includes(n)).join(', ')}`);
   ok('screenshot is annotated read-only', tools.find((t) => t.name === 'screenshot').annotations?.readOnlyHint === true);
   const listJson = JSON.stringify(tools);
   ok('tool list is slim (no output schemas, $schema or ±2^53 bounds)',
     !tools.some((t) => t.outputSchema) && !listJson.includes('$schema') && !listJson.includes('9007199254740991'));
-  ok('tool list stays small', listJson.length / 4 < 3600, `~${Math.round(listJson.length / 4)} tokens`);
+  ok('tool list stays small', listJson.length / 4 < 3750, `~${Math.round(listJson.length / 4)} tokens`);
   ok('core set names real tools', CORE_TOOLS.every((t) => names.includes(t)));
   const { prompts } = await client.listPrompts();
   ok('prompts listed', ['smoke_test_rom', 'regression_check', 'find_ram_address', 'record_regression_test'].every((p) => prompts.some((x) => x.name === p)));
@@ -213,6 +214,60 @@ try {
   ok('memory_card format', !r.isError, textOf(r));
   r = await call('memory_card', { action: 'list', slot: 2 });
   ok('memory_card list on a blank card', !r.isError && /0 save\(s\), 15 free/.test(textOf(r)), textOf(r));
+
+  // --- Converters ---
+  {
+    const sq = new Uint8Array(16 * 16 * 4).fill(0);
+    for (let i = 0; i < 256; i++) sq.set([0, 255, 0, 255], i * 4);
+    await writeFile(path.join(OUT, 'green.png'), encodePng({ width: 16, height: 16, channels: 4, data: sq }));
+  }
+  r = await call('texture', { action: 'convert', png: rel('green.png'), x: 640, y: 0, clutX: 640, clutY: 480, out: rel('green.tim') });
+  ok('texture convert → .tim with the placement', !r.isError && existsSync(path.join(OUT, 'green.tim')) && /pixels at VRAM 640,0 \(4x16 words\), CLUT 640,480; texture page 640,0, u0 = 0, v0 = 0/.test(textOf(r)), textOf(r));
+  r = await call('texture', { action: 'convert', png: rel('green.png'), out: rel('green.c'), name: 'green_tim' });
+  ok('texture convert → C array', !r.isError && /const uint32_t green_tim\[\]/.test(await readFile(path.join(OUT, 'green.c'), 'utf8')));
+  await call('load_disc', { path: EXE });
+  await call('wait_frames', { frames: 20 });
+  r = await call('texture', { action: 'inject', tim: rel('green.tim') });
+  ok('texture inject writes VRAM', !r.isError && /Injected into VRAM/.test(textOf(r)) && images(r)[0]?.width === 1024, textOf(r));
+  await call('wait_frames', { frames: 1 });
+  {
+    const shot = images(await call('screenshot', { scale: 1 }))[0];
+    const at = (x, y) => Array.from(shot.data.subarray((y * shot.width + x) * shot.channels, (y * shot.width + x) * shot.channels + 3));
+    // The fixture's sprite sits at box_x+8, box_y-24 = 152,80.
+    ok('the game draws the injected texture next frame', at(160, 88)[0] < 16 && at(160, 88)[1] > 240 && at(160, 88)[2] < 16, JSON.stringify(at(160, 88)));
+  }
+  r = await call('texture', { action: 'export', x: 640, y: 0, w: 16, h: 16, depth: 4, clutX: 640, clutY: 480, out: rel('exported.png') });
+  ok('texture export through the CLUT', !r.isError && decodePng(await readFile(path.join(OUT, 'exported.png'))).width === 16, textOf(r));
+  {
+    const W = 64, H = 32, d = new Uint8Array(W * H * 4);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) d.set(((x >> 4) + (y >> 4)) % 2 ? [200, 50, 50, 255] : [50, 50, 200, 255], (y * W + x) * 4);
+    await writeFile(path.join(OUT, 'level.png'), encodePng({ width: W, height: H, channels: 4, data: d }));
+    await writeFile(path.join(OUT, 'level.tmj'), JSON.stringify({ width: 4, height: 2, tilewidth: 16, tileheight: 16, layers: [{ type: 'tilelayer', data: [1, 2, 1, 2, 2, 1, 2, 1] }], tilesets: [{ firstgid: 1, tilewidth: 16, tileheight: 16, columns: 2, image: 'tiles.png' }] }));
+    const t = new Uint8Array(32 * 16 * 4);
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 32; x++) t.set(x < 16 ? [50, 50, 200, 255] : [200, 50, 50, 255], (y * 32 + x) * 4);
+    await writeFile(path.join(OUT, 'tiles.png'), encodePng({ width: 32, height: 16, channels: 4, data: t }));
+  }
+  r = await call('background', { png: rel('level.png'), out: rel('level.c') });
+  ok('background from a PNG: 2 unique tiles, files written', !r.isError && /4x2 map, 2 unique 16px tiles of 8/.test(textOf(r)) && existsSync(path.join(OUT, 'level.tim')) && existsSync(path.join(OUT, 'level.h')), textOf(r));
+  r = await call('background', { tiled: rel('level.tmj') });
+  ok('background from a Tiled map', !r.isError && /4x2 map, 2 unique/.test(textOf(r)) && images(r).length === 1, textOf(r));
+  {
+    const pcm = Int16Array.from({ length: 4410 }, (_, i) => Math.round(Math.sin(i / 10) * 10000));
+    const h = Buffer.alloc(44);
+    h.write('RIFF', 0, 'latin1'); h.writeUInt32LE(36 + pcm.length * 2, 4); h.write('WAVE', 8, 'latin1'); h.write('fmt ', 12, 'latin1');
+    h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(44100, 24); h.writeUInt32LE(88200, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34);
+    h.write('data', 36, 'latin1'); h.writeUInt32LE(pcm.length * 2, 40);
+    await writeFile(path.join(OUT, 'beep.wav'), Buffer.concat([h, Buffer.from(pcm.buffer)]));
+  }
+  r = await call('data', { kind: 'sound', wav: rel('beep.wav'), out: rel('beep.vag') });
+  ok('data sound → .vag with the SPU pitch', !r.isError && /SPU pitch 0x800/.test(textOf(r)) && (await readFile(path.join(OUT, 'beep.vag'))).toString('latin1', 0, 4) === 'VAGp', textOf(r));
+  r = await call('data', { kind: 'sound', wav: rel('beep.wav'), out: rel('beep.c'), loop: true });
+  ok('data sound → C (looping)', !r.isError && /looping/.test(textOf(r)) && /BEEP_PITCH 0x800/.test(await readFile(path.join(OUT, 'beep.h'), 'utf8')));
+  r = await call('data', { kind: 'table', table: 'sin', out: rel('sintab.h') });
+  ok('data table', !r.isError && /4096 int16_t entries/.test(textOf(r)), textOf(r));
+  await writeFile(path.join(OUT, 'tri.obj'), 'v 0 1 0\nv -1 -1 0\nv 1 -1 0\nf 1 2 3\n');
+  r = await call('data', { kind: 'mesh', obj: rel('tri.obj'), out: rel('tri.c') });
+  ok('data mesh', !r.isError && /3 vertices, 0 normals, 1 triangles/.test(textOf(r)), textOf(r));
 
   // --- The bundled demo ---
   r = await call('load_disc', { path: 'demo/demo.cue' });
