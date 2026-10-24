@@ -1,5 +1,8 @@
 # PS1 emulator + AI test harness
 
+[![test](https://github.com/sandrinsol/ps1-test/actions/workflows/test.yml/badge.svg)](https://github.com/sandrinsol/ps1-test/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/sandrinsol/ps1-test)](https://github.com/sandrinsol/ps1-test/releases/latest)
+
 Play PlayStation (PS1) games and homebrew in the browser, or let an AI agent test
 them through an MCP server. Everything runs offline from the bundled `data/` folder
 (EmulatorJS with the PCSX-ReARMed core, plus the free OpenBIOS, so no Sony BIOS is
