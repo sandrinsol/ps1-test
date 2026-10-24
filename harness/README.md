@@ -106,7 +106,7 @@ VS Code uses the key `"servers"` instead of `"mcpServers"`
 Prompts: `smoke_test_rom`, `regression_check`, `find_ram_address`,
 `record_regression_test`. Resources: `emu://screen`, `emu://status`.
 
-**Token use.** Tool definitions are sent with every request: ~3,700 tokens for all
+**Token use.** Tool definitions are sent with every request: ~4,650 tokens for all
 tools, ~1,800 with `PS1TEST_TOOLS=core` (`load_disc wait_frames press set_button
 set_analog wait_until screenshot read_memory write_memory run_sequence assert_golden
 status build describe`). A 2× screenshot is ~410 tokens; `describe` is usually under
