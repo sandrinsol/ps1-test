@@ -58,7 +58,8 @@ export function summarizeCd(entries, { files = [], name = () => null, cyclesPerF
   const flush = () => {
     if (!run) return;
     const f = fileAt(files, run.from);
-    const where = f ? ` ${f.path}${run.from > f.lba ? ` from sector ${run.from - f.lba}` : ''}` : '';
+    const where = f ? ` ${f.path}${run.from > f.lba ? ` from sector ${run.from - f.lba}` : ''}`
+      : run.from < 16 ? ' (system area)' : run.from === 16 ? ' (volume descriptor)' : '';
     lines.push(`${run.when} read ${run.n} sector(s) ${run.from}-${run.to} (${run.msf})${where}`);
     run = null;
   };
@@ -70,6 +71,7 @@ export function summarizeCd(entries, { files = [], name = () => null, cyclesPerF
       run = { from: e.lba, to: e.lba, n: 1, when: when(e.cycle), msf: e.msf.map(pad).join(':') };
       continue;
     }
+    if (e.type === 'irq' && e.irq === 1) continue;   // one per sector: the reads say it
     flush();
     if (e.type === 'command') {
       commands++;
@@ -84,7 +86,6 @@ export function summarizeCd(entries, { files = [], name = () => null, cyclesPerF
       lines.push(`${when(e.cycle)} ${e.name}${p ? ' ' + p : ''}${fn ? `  [from ${fn}]` : ''}`);
     } else if (e.type === 'irq') {
       if (e.irq === 5) errors++;
-      if (e.irq === 1) continue;   // one per sector: the reads say it
       const st = e.result.length ? ` stat ${hex2(e.result[0])} (${STATUS(e.result[0])})${e.result.length > 1 ? ' ' + e.result.slice(1).map(hex2).join(' ') : ''}` : '';
       lines.push(`${when(e.cycle)}   → ${e.name}${st}`);
     }

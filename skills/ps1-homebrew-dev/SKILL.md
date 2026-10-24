@@ -64,8 +64,9 @@ Link small assets with `psn00bsdk_target_incbin`; put large ones on the disc
 | Flicker / half-drawn frame | `gpu_capture` | Drawing into the displayed buffer (DrawSync/VSync/swap order), primitive buffer overflow |
 | Giant/missing polygons | `check` | Polygon over 1023×511 (GTE values overflowed, vertex behind the camera not culled) |
 | Slowdown | `check` with the frame counter, `describe` `cpu_usage`, `profile` | See `ps1-performance` |
-| No sound | `read_memory` 0x1F801DAA (SPUCNT), `check` | SPU not initialised, sample uploaded below 0x1010 or not 8-byte aligned, volume 0, KON not written |
+| No sound | `spu` (voices and the reason they're silent), `spu` `sample` to hear what was uploaded | SPU not initialised, sample uploaded below 0x1010 or not 8-byte aligned, volume 0, KON not written |
 | Input ignored | `describe`, pad buffer in `read_memory` | Reading before the BIOS fills the buffer (type 0), buttons are active-low, analog fields read on a digital pad |
+| Disc loading hangs or reads the wrong data | `cd_log` (commands, errors, which file each read hits) | Setloc in binary instead of BCD, a file's sector taken from a stale directory listing, reading before the drive answered (no wait for INT2/INT3), CdlModeSize wrong for the sector size |
 | Save fails | `memory_card list` | Card not formatted, filename/region prefix wrong, title frame missing |
 
 Memory cards: `memory_card` `format` before testing a save, `list` to see the

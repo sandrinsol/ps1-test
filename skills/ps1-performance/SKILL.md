@@ -66,7 +66,8 @@ The GPU is fill-rate bound: big, textured, semi-transparent primitives cost the 
 ## 4. Loading and memory
 
 - CD reads are 300 KB/s at 2×: load a level once, stream only music/XA; group files
-  so they're read in one seek.
+  so they're read in one seek. `cd_log` over a load shows every seek and which file
+  each read hits, so scattered files and repeated reads stand out.
 - 2 MB RAM: watch the image end (`check` reports the stack low point vs the data
   end); compress assets (LZ) if the image grows.
 - Upload textures once at level start, not per frame; reuse VRAM regions.
