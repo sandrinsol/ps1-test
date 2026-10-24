@@ -7,6 +7,9 @@ needed).
 
 - **Play:** see below.
 - **Make or test games with an AI agent:** see [harness/README.md](harness/README.md).
+  The agent can build your game, read its variables by name, see every GPU
+  command a frame sends, check it against hardware rules, and start new games
+  from the [PSn00bSDK template](templates/psn00bsdk).
 
 ## Play
 
@@ -16,7 +19,8 @@ Browsers won't load the emulator from `file://`, so serve the folder:
 python3 -m http.server 8000    # or double-click start.command on macOS
 ```
 
-Open <http://localhost:8000>, click **Load disc or EXE** and pick a disc image (a
+Open <http://localhost:8000> and click **Try the demo** (a small game built from
+the template, in [`demo/`](demo)), or **Load disc or EXE** and pick a disc image (a
 `.cue` together with its `.bin` files, or a single `.bin`/`.iso`), a homebrew `.exe`
 or a `.zip`. Choose the bundled OpenBIOS, the built-in HLE BIOS, or your own BIOS
 dump (best compatibility; it never leaves your computer).

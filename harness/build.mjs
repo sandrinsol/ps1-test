@@ -10,7 +10,8 @@ import path from 'node:path';
 
 /** Errors and warnings in build output, in order, without duplicates. @returns {Diagnostic[]} */
 export function parseDiagnostics(output) {
-  const lines = output.split(/\r?\n/);
+  // GCC uses typographic quotes in UTF-8 locales: report plain ones.
+  const lines = output.replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').split(/\r?\n/);
   /** @type {Diagnostic[]} */
   const out = [];
   const seen = new Set();

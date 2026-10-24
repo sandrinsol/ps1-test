@@ -19,7 +19,7 @@ export function exeIssues(buf, { region = null } = {}) {
   try { x = exeInfo(buf); } catch (e) { return [{ level: 'error', msg: e.message }]; }
   const out = [];
   const end = x.load + x.size;
-  if (!x.region) out.push({ level: 'warn', msg: 'PS-EXE has no region marker ("Sony Computer Entertainment Inc. for North America area" at 0x4C): a retail BIOS loading it from disc refuses it' });
+  if (!x.region) out.push({ level: 'info', msg: 'PS-EXE has no region marker ("Sony Computer Entertainment Inc. for … area" at 0x4C): the BIOS ignores it, but some loaders and emulators use it to pick NTSC or PAL' });
   else out.push({ level: 'ok', msg: `PS-EXE region ${x.region}` });
   if (region && x.region && ((region === 'pal') !== (x.region === 'PAL'))) out.push({ level: 'warn', msg: `PS-EXE is marked ${x.region} but runs as ${region.toUpperCase()}: a console of the other region won't boot it, and frame timing differs (50 vs 60 Hz)` });
   if ((x.load & 0x1fffffff) < 0x10000) out.push({ level: 'error', msg: `loads at ${hex(x.load)}, over the BIOS kernel's RAM (0x80000000-0x8000FFFF): load at 0x80010000 or above` });
@@ -47,7 +47,20 @@ export function discIssues(img, opts = {}) {
   const exe = isoFile(img, m[1].replace(/\\/g, '/'));
   if (!exe) return [...out, { level: 'error', msg: `SYSTEM.CNF boots ${m[1]}, which isn't on the disc` }];
   out.push({ level: 'ok', msg: `SYSTEM.CNF boots ${m[1]}${cnf.stack ? `, stack ${cnf.stack}` : ''}` });
+  // Sector 4 of a pressed disc holds the license text (and the region the drive's
+  // copy protection expects); homebrew discs without it need a modchip or softmod.
+  const lic = licenseText(img);
+  out.push(lic ? { level: 'ok', msg: `license data: "${lic}"` } : { level: 'info', msg: 'no license data in sector 4: an unmodified console won\'t boot the disc (it needs a modchip, a softmod such as UniROM / FreePSXBoot, or an emulator); add the license sectors with mkpsxiso\'s <license> for your region' });
   return [...out, ...exeIssues(exe, opts)];
+}
+
+/** The license text in sector 4 of a disc's data track, or null. */
+function licenseText(img) {
+  const raw = img.length % 2352 === 0;
+  const off = raw ? 4 * 2352 + (img[16 * 2352 + 15] === 2 ? 24 : 16) : 4 * 2048;
+  const t = img.toString('latin1', off, off + 2048);
+  const m = /(Licensed\s+by\s+Sony[^\0]{0,60}|Sony Computer Entertainment[^\0]{0,40})/.exec(t);
+  return m ? m[1].replace(/\s+/g, ' ').trim() : null;
 }
 
 /** Watches a run frame by frame. Feed observe() once per frame. */
@@ -140,7 +153,11 @@ export class RunChecker {
     for (const e of this.exceptions.values()) {
       out.push({ level: 'error', msg: `CPU exception: ${EXC_NAMES[e.code] ?? `code ${e.code}`} at ${hex(e.epc)}${this.name(e.epc) ? ` (${this.name(e.epc)})` : ''}${e.code === 4 || e.code === 5 ? `, address ${hex(e.badVaddr)}` : ''}; first on frame ${e.frame} of the run${e.count > 1 ? `, ${e.count} times` : ''}` });
     }
-    const inBios = this.pcs.every((p) => (p >>> 0) >= 0xbfc00000 || (p & 0x1fffffff) < 0x10000);
+    // In the BIOS/kernel at every frame boundary AND no sign of the game running
+    // (games that wait for VSync through the kernel's interrupt handler are at
+    // 0x80000080 every frame while running fine).
+    const progressed = this.counters.some((c, i) => i > 0 && c !== null && c !== this.counters[i - 1]) || this.drew.some(Boolean);
+    const inBios = !progressed && this.pcs.every((p) => (p >>> 0) >= 0xbfc00000 || (p & 0x1fffffff) < 0x10000);
     if (inBios && !this.exceptions.size) out.push({ level: 'warn', msg: 'the CPU was in the BIOS for the whole run: the game hadn\'t started yet (still booting from disc?). Run more frames first.' });
     // Hung: the PC on one address for 30 frames AND the game making no progress
     // (its frame counter still, or no GPU work). A healthy game is also always at

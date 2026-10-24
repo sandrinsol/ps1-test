@@ -9,7 +9,7 @@
 //   change   write_memory, state (save/load), memory_card, cheats
 //   test     run_sequence, assert_golden, export_script, ab_compare, record_video
 //   find     ram_search
-//   develop  build (compile + reload), check (hardware rules)
+//   develop  build (compile + reload), check (hardware rules), new_project
 // Addresses can be symbol names when there is a symbol file (.elf/.map/.sym).
 // A ps1test.json in the workspace sets project defaults (build, rom, bios, watch).
 // The machine is paused between calls, so every read lands on an exact frame.
@@ -41,6 +41,7 @@ import { primLine, captureImage, vramPng, texturePng, stateDrawEnv } from './gpu
 import { display } from './psx-memory.mjs';
 import { listSaves, formatCard } from './mcard.mjs';
 import { exeIssues, discIssues, RunChecker } from './checks.mjs';
+import { TEMPLATES, createProject } from './templates.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(__dirname, 'out');
@@ -403,7 +404,11 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
   }, async ({ frames, list, kinds, only, image, scale }) => {
     const cap = await emu.captureFrame(frames);
     record({ wait: frames });
-    const name = (a) => emu.symbols?.nameOf(a, { maxOffset: 0x10000 }) ?? null;
+    const name = (a) => {
+      const n = emu.symbols?.nameOf(a, { maxOffset: 0x10000 }) ?? null;
+      // Past the end of the program's data: malloc'd memory, not that symbol.
+      return n && /^_*(end|bss_end|heap_start)_*(\+|$)/.test(n) ? `heap${n.includes('+') ? n.slice(n.indexOf('+')) : ''}` : n;
+    };
     const shown = cap.prims.filter((p) => !kinds || kinds.includes(p.kind));
     const stats = Object.entries(cap.stats).map(([k, v]) => `${v} ${k}`).join(', ') || 'nothing';
     const env = cap.env;
@@ -797,6 +802,15 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
     return result(`${text}\nFrame ${await emu.frameNum()}.${await watchLine()}`, { built: true, frame: await emu.frameNum() });
   }, { needsRom: false });
 
+  tool('new_project', {
+    description: 'New game from a working template: text, a moving player sprite, a GTE cube, a passing test, ps1test.json, CI, dev container.',
+    inputSchema: { template: z.enum(Object.keys(TEMPLATES)).default('psn00bsdk'), path: z.string() },
+  }, async ({ template, path: p }) => {
+    const dest = await writePath(p);
+    const files = await createProject(template, dest);
+    return result(`Created ${dest} (${files.length} files): ${files.join(', ')}. Set the workspace to it (or PS1TEST_ROOT), then build. See its README for the SDK it needs.`);
+  }, { needsRom: false });
+
   tool('describe', {
     description: 'The machine as text, far cheaper than a screenshot: frame, where the CPU is, watched values, display mode, % of the screen changed since the last describe; gpu:true runs one frame and summarises what was drawn. watch sets the variables reported after every step that advances time ("name", "name:s16", "0x80010000:u32"; [] clears).',
     inputSchema: {
@@ -1016,4 +1030,13 @@ export async function main() {
   console.error(`ps1-test-mcp ${VERSION} ready (stdio).`);
 }
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
-if (isMain) await main();
+if (isMain && process.argv[2] === 'new') {
+  // node mcp-server.mjs new <template> <dir>
+  const [, , , template, dir] = process.argv;
+  if (!template || !dir) {
+    console.error(`usage: node mcp-server.mjs new <template> <dir>\ntemplates: ${Object.entries(TEMPLATES).map(([k, v]) => `\n  ${k.padEnd(10)} ${v}`).join('')}`);
+    process.exit(1);
+  }
+  const files = await createProject(template, path.resolve(dir));
+  console.log(`Created ${dir} (${files.length} files). cd ${dir} && cmake --preset default && cmake --build build`);
+} else if (isMain) await main();

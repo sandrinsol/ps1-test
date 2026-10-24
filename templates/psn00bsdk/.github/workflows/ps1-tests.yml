@@ -1,0 +1,62 @@
+# Builds the game and runs every tests/ps1/*.json script against it in the
+# ps1-test emulator. Failures upload the screenshots and diffs.
+name: ps1-tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache PSn00bSDK
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: /opt/psn00bsdk
+          key: psn00bsdk-v0.24-${{ hashFiles('.devcontainer/install-psn00bsdk.sh', '.devcontainer/elf2x-ptload.patch') }}
+
+      - name: Install the MIPS toolchain and PSn00bSDK
+        run: |
+          if [ "${{ steps.sdk.outputs.cache-hit }}" = true ]; then
+            sudo apt-get update && sudo apt-get install -y gcc-mipsel-linux-gnu binutils-mipsel-linux-gnu ninja-build
+          else
+            sudo .devcontainer/install-psn00bsdk.sh /opt/psn00bsdk
+          fi
+          echo "PSN00BSDK_LIBS=/opt/psn00bsdk/lib/libpsn00b" >> "$GITHUB_ENV"
+          echo "/opt/psn00bsdk/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: cmake --preset default && cmake --build build
+
+      - name: Fetch the test harness
+        run: |
+          git clone --depth 1 https://github.com/sandrinsol/ps1-test "$RUNNER_TEMP/ps1test"
+          cd "$RUNNER_TEMP/ps1test/harness"
+          npm ci --ignore-scripts
+          npx playwright install --with-deps chromium
+
+      - name: Run the tests
+        run: |
+          status=0
+          for script in tests/ps1/*.json; do
+            echo "::group::$script"
+            node "$RUNNER_TEMP/ps1test/harness/runner.mjs" "$script" "out/$(basename "$script" .json)" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ps1-test-results
+          path: |
+            out/
+            tests/ps1/goldens/*.diff.png

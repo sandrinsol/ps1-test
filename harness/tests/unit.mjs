@@ -92,6 +92,7 @@ ok('GCC error', diags.some((d) => d.level === 'error' && d.file === 'src/main.c'
 ok('GCC warning', diags.some((d) => d.level === 'warning' && d.line === 20));
 ok('CMake error with its message', diags.some((d) => d.file === 'CMakeLists.txt' && /Unknown CMake command/.test(d.msg)));
 ok('undefined reference', diags.some((d) => /missing_fn/.test(d.msg)));
+ok('typographic quotes become plain ones', parseDiagnostics('a.c:1:2: error: expected \u2018;\u2019 before \u2018if\u2019')[0]?.msg === "expected ';' before 'if'");
 
 // ---- Memory card formats ----
 const card = Buffer.alloc(128 * 1024, 7);
