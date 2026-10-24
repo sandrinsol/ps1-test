@@ -39,6 +39,17 @@ The `psn00bsdk` template (`new_project`) uses v0.24.
   data with `GPREL`); extra `-march`/`-mips32` flags or prebuilt libraries made for
   another MIPS bring back the reserved-instruction crash.
 
+## C++
+
+PSn00bSDK compiles C++ with `-fno-exceptions -fno-rtti` and no standard library:
+classes, templates, `constexpr`, references, namespaces and virtual functions work;
+`std::` containers, exceptions and `dynamic_cast` don't. Keep global objects
+constant-initialised (default member initialisers, no constructors doing work) and
+set things up from `main`. The `psn00bsdk-cpp` template (`new_project`) is the C
+template's game in classes — `Display` with `alloc<POLY_F4>()`, `Player`, `Cube`,
+`Sound` — and draws the same frames. Add `CXX` to the CMake `LANGUAGES`, and declare
+`incbin` symbols `extern "C"`.
+
 ## The frame
 
 ```c

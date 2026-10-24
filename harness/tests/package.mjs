@@ -39,7 +39,7 @@ try {
   ok('tarball has the core and BIOS', ['data/cores/pcsx_rearmed-wasm.data', 'data/cores/reports/pcsx_rearmed-ps1test.json', 'data/bios/openbios.bin'].every((f) => names.includes(f)));
   ok('tarball has the page + server', names.includes('harness/page.html') && names.includes('harness/mcp-server.mjs') && names.includes('harness/launch.mjs'));
   ok('tarball has no tests, demo or core sources', !names.some((f) => f.startsWith('harness/tests/') || f.startsWith('demo/') || f.startsWith('core/')));
-  ok('tarball has the template without build output', ['templates/psn00bsdk/src/main.c', 'templates/psn00bsdk/CMakeLists.txt', 'templates/psn00bsdk/assets/player.tim', 'templates/psn00bsdk/.devcontainer/Dockerfile'].every((f) => names.includes(f)) && !names.some((f) => /^templates\/[^/]+\/build\//.test(f)));
+  ok('tarball has the template without build output', ['templates/psn00bsdk/src/main.c', 'templates/psn00bsdk/CMakeLists.txt', 'templates/psn00bsdk/assets/player.tim', 'templates/psn00bsdk/.devcontainer/Dockerfile', 'templates/psn00bsdk/.devcontainer/build-mips1-rt.sh', 'templates/psn00bsdk-cpp/src/main.cpp'].every((f) => names.includes(f)) && !names.some((f) => /^templates\/[^/]+\/build\//.test(f)));
 
   await writeFile(path.join(work, 'package.json'), '{"name":"consumer","private":true}');
   // Skip the postinstall; fetch the browser this install's Playwright expects (a

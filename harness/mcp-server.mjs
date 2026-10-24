@@ -32,13 +32,15 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { EmuHarness } from './driver.mjs';
+import { findSymbols } from './symbols.mjs';
 import { assertGolden, compare } from './assert.mjs';
 import { scalePng, contactSheet } from './png.mjs';
 import { saveVideo } from './recording.mjs';
 import { RamSearch, SEARCH_OPS, SEARCH_TYPES } from './ramsearch.mjs';
 import { runSteps, decodeValues, encodeValue, VALUE_TYPES } from './steps.mjs';
 import { runCommand, parseDiagnostics, formatDiagnostic, detectBuild, findRom, readProjectConfig } from './build.mjs';
-import { discFiles, dataTrack, isoList } from './disc.mjs';
+import { discFiles, dataTrack, isoList, makeDisc, exeInfo } from './disc.mjs';
+import { elfToExe } from './exe.mjs';
 import { primLine, captureImage, vramPng, texturePng, stateDrawEnv } from './gpu.mjs';
 import { display } from './psx-memory.mjs';
 import { listSaves, formatCard } from './mcard.mjs';
@@ -925,6 +927,72 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
       text += `\nReplayed ${steps.length} steps${res.failures ? ` (${res.failures} check(s) failed)` : ''}.`;
     }
     return result(`${text}\nFrame ${await emu.frameNum()}.${await watchLine()}`, { built: true, frame: await emu.frameNum() });
+  }, { needsRom: false });
+
+  tool('disc', {
+    description: 'Make a bootable disc (.cue/.bin: SYSTEM.CNF, the EXE, extra files) from a PS-EXE or ELF; lists its files, checks it, loads it unless load:false.',
+    inputSchema: {
+      exe: z.string().describe('.exe, or .elf (converted)'),
+      out: z.string().describe('.cue path (the .bin goes beside it)'),
+      files: z.record(z.string(), z.string()).optional().describe('{"DATA.BIN": "path"} (8.3 names, root directory)'),
+      label: z.string().max(32).default('PS1GAME'),
+      load: z.boolean().default(true),
+    },
+  }, async ({ exe, out, files = {}, label, load }) => {
+    const src = await resolvePath(exe);
+    let exeBuf = await readFile(src);
+    if (exeBuf.readUInt32BE(0) === 0x7f454c46) exeBuf = elfToExe(exeBuf);
+    const info = exeInfo(exeBuf);
+    /** @type {Record<string, Buffer>} */
+    const extra = {};
+    for (const [name, p] of Object.entries(files)) extra[name] = await readFile(await resolvePath(p));
+    const dest = await writePath(out);
+    await mkdir(path.dirname(dest), { recursive: true });
+    const made = await makeDisc({ exe: exeBuf, out: dest, label, exeName: 'MAIN.EXE', files: extra });
+    const img = await readFile(made.bin);
+    const list = isoList(img).filter((f) => !f.system).map((f) => `${f.path} (${f.size} B, sector ${f.lba})`);
+    const issues = discIssues(img, {}).filter((f) => f.level !== 'ok').map((f) => `${f.level}: ${f.msg}`);
+    let text = `Wrote ${made.cue} + ${path.basename(made.bin)} (${img.length / 2352} sectors): ${list.join(', ')}. EXE entry ${hex(info.entry)}, ${info.size} B at ${hex(info.load)}.${issues.length ? '\n' + issues.join('\n') : ''}`;
+    if (load) {
+      // The symbols of the program it was made from (an .elf given, or one beside the EXE).
+      const sym = /\.elf$/i.test(src) ? src : await findSymbols(src);
+      await loadRom(made.cue, sym ? { symbols: sym } : {}, { again: true });
+      text += `\nLoaded (${biosName()}${symbolInfo()}); it boots through the BIOS in ~200 frames. Frame ${await emu.frameNum()}.`;
+    }
+    return result(text, { cue: made.cue, files: list.length });
+  }, { needsRom: false });
+
+  tool('send_to_console', {
+    description: 'Upload a PS-EXE to a real PS1 running Unirom over a serial cable with nops (NOTPSXSerial) and run it. PS1TEST_UPLOADER overrides the command ({exe}, {port}).',
+    inputSchema: {
+      exe: z.string().optional().describe('default: the loaded EXE, else ps1test.json\'s build output'),
+      port: z.string().optional().describe('COM3, /dev/ttyUSB0… (default $PS1TEST_SERIAL)'),
+      fast: z.boolean().default(false).describe('Unirom in fast (518400 baud) mode'),
+      dry_run: z.boolean().default(false),
+    },
+  }, async ({ exe, port, fast, dry_run: dryRun }) => {
+    const bd = await baseDir();
+    let file = exe ? await resolvePath(exe) : (emu?.options.exe ? romPath : null);
+    if (!file) {
+      const c = await readProjectConfig(bd);
+      const guess = c.rom ? (await resolvePath(c.rom)).replace(/\.(cue|bin)$/i, '.exe') : null;
+      if (guess && (await readFile(guess).then(() => true, () => false))) file = guess;
+    }
+    if (!file) throw new Error('give `exe` (a PS-EXE; for a disc, its EXE)');
+    exeInfo(await readFile(file));    // a PS-EXE, or this throws with the reason
+    port ??= process.env.PS1TEST_SERIAL;
+    if (!port) throw new Error('give `port` (COM3, /dev/ttyUSB0…) or set PS1TEST_SERIAL');
+    const q = (v) => `"${v}"`;
+    const template = process.env.PS1TEST_UPLOADER ?? `nops ${fast ? '/fast ' : ''}/exe {exe} {port}`;
+    const cmd = template.replaceAll('{exe}', q(file)).replaceAll('{port}', port);
+    if (dryRun) return result(`Would run: ${cmd}`, { command: cmd });
+    const r = await runCommand(cmd, bd, { timeout: 180000 });
+    const out = r.output.trim().split(/\r?\n/).slice(-15).join('\n');
+    if (r.code !== 0 || r.timedOut) {
+      const missing = /not (found|recognized)|ENOENT/i.test(r.output) && !process.env.PS1TEST_UPLOADER;
+      return errText(`Upload FAILED (${r.timedOut ? 'timed out' : `exit ${r.code}`}): ${cmd}\n${out}${missing ? '\nnops (NOTPSXSerial) isn\'t on PATH: install it, or set PS1TEST_UPLOADER to your uploader\'s command with {exe} and {port}. The console must be in Unirom\'s shell (or have it in its caetla/ROM cartridge).' : ''}`);
+    }
+    return result(`Sent ${path.basename(file)} to ${port} (${(r.ms / 1000).toFixed(1)}s) with: ${cmd}${out ? '\n' + out : ''}`, { sent: true });
   }, { needsRom: false });
 
   tool('new_project', {

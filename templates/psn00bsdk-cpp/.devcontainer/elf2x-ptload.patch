@@ -1,0 +1,41 @@
+diff --git a/tools/util/elf2x.c b/tools/util/elf2x.c
+index fc0ea9f..03e6f49 100644
+--- a/tools/util/elf2x.c
++++ b/tools/util/elf2x.c
+@@ -140,7 +140,9 @@ int main(int argc, char** argv) {
+ 
+ 		fread( &prg_heads[i], 1, sizeof(PRG_HEADER), fp );
+ 
+-		if( prg_heads[i].flags == 4 ) {
++		// Only loadable segments (a Linux-targeted linker also emits e.g. a
++		// PT_GNU_STACK header at address 0)
++		if( prg_heads[i].seg_type != 1 || prg_heads[i].flags == 4 ) {
+ 			continue;
+ 		}
+ 
+@@ -148,14 +150,13 @@ int main(int argc, char** argv) {
+ 			exe_taddr = prg_heads[i].p_vaddr;
+ 		}
+ 
+-		if( prg_heads[i].p_vaddr > exe_haddr ) {
+-			exe_haddr = prg_heads[i].p_vaddr;
++		if( prg_heads[i].p_vaddr + prg_heads[i].p_filesz > exe_haddr ) {
++			exe_haddr = prg_heads[i].p_vaddr + prg_heads[i].p_filesz;
+ 		}
+ 
+ 	}
+ 
+ 	exe_tsize  = (exe_haddr - exe_taddr);
+-	exe_tsize += prg_heads[head.prg_entry_count - 1].p_filesz;
+ 
+ 	if (!quiet)
+ 		printf(
+@@ -186,7 +187,7 @@ int main(int argc, char** argv) {
+ 
+ 	for( i=0; i<head.prg_entry_count; i++ ) {
+ 
+-		if( prg_heads[i].flags == 4 ) {
++		if( prg_heads[i].seg_type != 1 || prg_heads[i].flags == 4 ) {
+ 			continue;
+ 		}
+ 

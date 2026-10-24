@@ -37,14 +37,14 @@ try {
   const ALL = ['load_disc', 'wait_frames', 'press', 'set_button', 'set_analog', 'wait_until', 'reset', 'screenshot',
     'read_memory', 'read_cpu', 'gpu_capture', 'view_vram', 'describe', 'status', 'write_memory', 'state', 'cheats',
     'memory_card', 'run_sequence', 'record_video', 'assert_golden', 'export_script', 'ab_compare', 'ram_search', 'build', 'check', 'new_project',
-    'texture', 'background', 'data', 'debug', 'profile', 'spu', 'cd_log'];
+    'texture', 'background', 'data', 'debug', 'profile', 'spu', 'cd_log', 'disc', 'send_to_console'];
   for (const n of ALL) ok(`tool listed: ${n}`, names.includes(n));
   ok('exactly the documented tools', names.length === ALL.length, `${names.length}: ${names.filter((n) => !ALL.includes(n)).join(', ')}`);
   ok('screenshot is annotated read-only', tools.find((t) => t.name === 'screenshot').annotations?.readOnlyHint === true);
   const listJson = JSON.stringify(tools);
   ok('tool list is slim (no output schemas, $schema or ±2^53 bounds)',
     !tools.some((t) => t.outputSchema) && !listJson.includes('$schema') && !listJson.includes('9007199254740991'));
-  ok('tool list stays small', listJson.length / 4 < 4450, `~${Math.round(listJson.length / 4)} tokens`);
+  ok('tool list stays small', listJson.length / 4 < 4750, `~${Math.round(listJson.length / 4)} tokens`);
   ok('core set names real tools', CORE_TOOLS.every((t) => names.includes(t)));
   const { prompts } = await client.listPrompts();
   ok('prompts listed', ['smoke_test_rom', 'regression_check', 'find_ram_address', 'record_regression_test'].every((p) => prompts.some((x) => x.name === p)));
@@ -340,6 +340,29 @@ try {
   ok('reset', !r.isError, textOf(r));
   r = await call('load_disc', { path: 'harness/package.json' });
   ok('load_disc refuses a non-PS1 file', r.isError && /not a PS1/.test(textOf(r)), textOf(r));
+
+  // --- disc: an EXE (and a data file) as a bootable disc ---
+  await writeFile(path.join(OUT, 'level.dat'), Buffer.alloc(5000, 7));
+  r = await call('disc', { exe: EXE, out: rel('made/game.cue'), files: { 'LEVEL.DAT': rel('level.dat') } });
+  ok('disc writes a .cue/.bin with SYSTEM.CNF, the EXE and the extra file', !r.isError && existsSync(path.join(OUT, 'made/game.bin')) && /\/SYSTEM\.CNF/.test(textOf(r)) && /\/MAIN\.EXE/.test(textOf(r)) && /\/LEVEL\.DAT \(5000 B/.test(textOf(r)), textOf(r));
+  r = await call('wait_until', { address: 'frame_count', as: 'u32', op: 'gte', value: 5, maxFrames: 900 });
+  ok('the made disc boots (with the symbols of the EXE it was made from)', r.structuredContent?.met, textOf(r));
+  r = await call('disc', { exe: 'harness/tests/fixtures/hello.elf', out: rel('made/fromelf.cue'), load: false });
+  ok('disc converts an ELF', !r.isError && /MAIN\.EXE/.test(textOf(r)), textOf(r));
+
+  // --- send_to_console (no console here: a stand-in uploader prints its arguments) ---
+  r = await call('send_to_console', { exe: EXE, port: 'COM9', fast: true, dry_run: true });
+  ok('send_to_console builds the nops command', /Would run: nops \/fast \/exe ".*hello\.exe" COM9/.test(textOf(r)), textOf(r));
+  await writeFile(path.join(OUT, 'fake-uploader.mjs'), "console.log('UPLOADED', process.argv.slice(2).join(' '));");
+  process.env.PS1TEST_UPLOADER = `node "${path.join(OUT, 'fake-uploader.mjs')}" {exe} {port}`;
+  r = await call('send_to_console', { exe: EXE, port: 'COM9' });
+  ok('send_to_console runs the uploader with the EXE and port', !r.isError && /UPLOADED .*hello\.exe COM9/.test(textOf(r)), textOf(r));
+  process.env.PS1TEST_UPLOADER = 'node -e "process.exit(3)" {exe} {port}';
+  r = await call('send_to_console', { exe: EXE, port: 'COM9' });
+  ok('send_to_console reports a failed upload', r.isError && /Upload FAILED \(exit 3\)/.test(textOf(r)), textOf(r));
+  delete process.env.PS1TEST_UPLOADER;
+  r = await call('send_to_console', { exe: 'harness/package.json', port: 'COM9', dry_run: true });
+  ok('send_to_console refuses a file that is not a PS-EXE', r.isError, textOf(r));
 
   // --- A/B ---
   r = await call('ab_compare', { romA: EXE, romB: CUE, steps: [{ wait: 400 }, { read: 'frame_count', as: 'u32' }] });

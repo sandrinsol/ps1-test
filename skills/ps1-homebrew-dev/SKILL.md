@@ -10,7 +10,7 @@ Speed: `ps1-performance`. Console differences: `ps1-real-hardware`.
 
 ## Start
 
-`new_project` (template `psn00bsdk`, a folder) gives a working game: double-buffered
+`new_project` (template `psn00bsdk` for C, `psn00bsdk-cpp` for C++, a folder) gives a working game: double-buffered
 display, font, a TIM sprite moved by the pad (or left stick), a GTE cube, a sound
 effect, `frame_count`/`cpu_usage`, a passing smoke test, a CI workflow and a dev
 container. From a shell: `node <ps1-test>/harness/mcp-server.mjs new psn00bsdk mygame`
@@ -46,6 +46,10 @@ The project's `ps1test.json` says how to build (`build`), what to load (`rom`,
 | WAV | `data` `kind: "sound"` | SPU ADPCM `.vag` (+ the pitch for its sample rate) |
 | `.obj` model | `data` `kind: "mesh"` | `SVECTOR` vertices/normals + faces |
 | sin/cos/reciprocal | `data` `kind: "table"` | fixed-point lookup tables |
+
+`disc` turns an EXE (or ELF) plus data files into a bootable `.cue`/`.bin` when a
+project has no disc build of its own; `send_to_console` runs the EXE on a real
+console with Unirom.
 
 Link small assets with `psn00bsdk_target_incbin`; put large ones on the disc
 (`iso.xml`) and load them with the CD library. Check placement with `view_vram`

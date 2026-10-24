@@ -47,7 +47,7 @@ starts from a clean state. Before calling a game done:
 
 | Tool | Use |
 |---|---|
-| **Unirom** + `nops` (or `NOTPSXSerial`) over a serial cable (or Unirom's network adapter) | Upload and run `game.exe` in seconds, `debug` mode for breakpoints and memory dumps |
+| **Unirom** + `nops` (or `NOTPSXSerial`) over a serial cable (or Unirom's network adapter) | Upload and run `game.exe` in seconds (the `send_to_console` tool does this: `port`, `fast`), `debug` mode for breakpoints and memory dumps |
 | **XStation / PSIO** ODE | Boot `game.cue`/`.bin` from SD like a disc |
 | **FreePSXBoot / tonyhax** | Boot homebrew on an unmodified console from a memory card |
 | **CD-R** (modded console) | Final test of real disc timing — burn at low speed, Mode 2 raw |
