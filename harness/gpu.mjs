@@ -155,7 +155,7 @@ export function decodeLog(buf, startEx = []) {
   }
   const stats = {};
   for (const p of prims) stats[p.kind] = (stats[p.kind] ?? 0) + 1;
-  return { prims, env: drawEnv(ex), exceptions, gp1, chains, stats, leftover: stream.length - i };
+  return { prims, env: drawEnv(ex), ex, exceptions, gp1, chains, stats, leftover: stream.length - i };
 }
 
 /** Bounding box of a primitive's vertices. */

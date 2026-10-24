@@ -11,6 +11,9 @@ import { elfToExe } from '../exe.mjs';
 import { parseSymbols, loadSymbols, parseAddress } from '../symbols.mjs';
 import { parseDiagnostics } from '../build.mjs';
 import { rawCard } from '../driver.mjs';
+import { formatCard, listSaves } from '../mcard.mjs';
+import { exeIssues, discIssues } from '../checks.mjs';
+import { decodeLog } from '../gpu.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp } from 'node:fs/promises';
@@ -97,5 +100,54 @@ const gme = Buffer.concat([Buffer.from('123-456-STD'.padEnd(3904, '\0'), 'latin1
 ok('DexDrive .gme header stripped', rawCard(gme).equals(card));
 try { rawCard(Buffer.alloc(1000)); threw = ''; } catch (err) { threw = err.message; }
 ok('wrong-size card rejected', /not a memory card/.test(threw));
+
+// ---- Memory cards: format, a save with a title and icon, listing ----
+const fc = formatCard();
+ok('formatted card lists empty', listSaves(fc).saves.length === 0 && listSaves(fc).freeBlocks === 15 && !listSaves(fc).problems.length);
+{
+  const c = Buffer.from(fc);
+  const d = c.subarray(128, 256);
+  d.writeUInt32LE(0x51, 0); d.writeUInt32LE(8192, 4); d.writeUInt16LE(0xffff, 8);
+  d.write('BASLUS-00067GAME0', 0x0a, 'latin1');
+  d[0x7f] = d.subarray(0, 0x7f).reduce((a, v) => a ^ v, 0);
+  const b = c.subarray(8192, 8192 * 2);
+  b.write('SC', 0, 'latin1'); b[2] = 0x11; b[3] = 1;
+  Buffer.from([0x82, 0x60, 0x82, 0x61, 0x81, 0x40, 0x82, 0x50]).copy(b, 4);   // "AB 1" in full-width SJIS
+  b.writeUInt16LE(0x7fff, 0x62);                                               // palette entry 1 = white
+  b.fill(0x11, 128, 256);                                                      // icon all colour 1
+  const l = listSaves(c);
+  const s0 = l.saves[0];
+  ok('save listed with game ID, region and decoded title', s0 && s0.gameId === 'SLUS-00067' && s0.region === 'NTSC-U' && s0.title === 'AB 1' && s0.blocks === 1, JSON.stringify({ ...s0, icon: undefined }));
+  ok('save icon decodes', s0?.icon && s0.icon.length > 50);
+  ok('free blocks counted', l.freeBlocks === 14);
+}
+
+// ---- EXE / disc rules ----
+const issues = (b, o) => exeIssues(b, o).filter((f) => f.level !== 'ok').map((f) => f.msg).join(' | ');
+ok('fixture EXE has no issues', issues(exe) === '', issues(exe));
+const noRegion = Buffer.from(exe); noRegion.fill(0, 0x4c, 0x800);
+ok('missing region marker flagged', /no region marker/.test(issues(noRegion)));
+ok('PAL run of an NTSC EXE flagged', /runs as PAL/.test(issues(exe, { region: 'pal' })));
+const lowLoad = Buffer.from(exe); lowLoad.writeUInt32LE(0x80008000, 0x18); lowLoad.writeUInt32LE(0x80008000, 0x10);
+ok('loading over the kernel flagged', /over the BIOS kernel/.test(issues(lowLoad)));
+const badEntry = Buffer.from(exe); badEntry.writeUInt32LE(0x80100000, 0x10);
+ok('entry outside the image flagged', /entry point .* outside/.test(issues(badEntry)));
+const disc = await readFile(bin);
+ok('disc rules: SYSTEM.CNF boots MAIN.EXE', discIssues(disc).some((f) => f.level === 'ok' && /boots MAIN\.EXE/.test(f.msg)));
+ok('disc without SYSTEM.CNF or PSX.EXE is an error', discIssues(Buffer.alloc(2352 * 40)).some((f) => f.level === 'error'));
+
+// ---- GPU log decoding ----
+const words = (type, src, addr, ws) => { const b = Buffer.alloc(8 + ws.length * 4); b.writeUInt32LE((type << 28) | (src << 24) | ws.length, 0); b.writeUInt32LE(addr >>> 0, 4); ws.forEach((w, i) => b.writeUInt32LE(w >>> 0, 8 + i * 4)); return b; };
+const log = Buffer.concat([
+  words(3, 0, 0x80020000, []),
+  words(1, 2, 0x80020000, [0xe5000000 | (100 & 0x7ff) | ((50 & 0x7ff) << 11), 0x28ff0000, 0, 10, 10 << 16, (10 << 16) | 10]),   // offset 100,50 + flat quad
+  words(1, 0, 0, [0x02000000]), words(1, 0, 0, [0]), words(1, 0, 0, [(16 << 16) | 16]),                                          // fill, word by word
+  words(4, 0, 0, [4 << 2, 0x80010010, 0x80010002]),
+]);
+const dec = decodeLog(log);
+ok('decodeLog: quad with the draw offset applied', dec.prims[0]?.kind === 'poly4' && dec.prims[0].verts[0][0] === 100 && dec.prims[0].verts[3][1] === 60, JSON.stringify(dec.prims[0]?.verts));
+ok('decodeLog: chain packet address', dec.prims[0].addr === 0x80020004 + 4 && dec.chains[0] === 0x80020000, dec.prims[0].addr.toString(16));
+ok('decodeLog: CPU-written fill reassembled from single words', dec.prims[1]?.kind === 'fill' && dec.prims[1].size[0] === 16);
+ok('decodeLog: exception', dec.exceptions[0]?.code === 4 && dec.exceptions[0].badVaddr === 0x80010002);
 
 done();

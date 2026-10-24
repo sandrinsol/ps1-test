@@ -588,6 +588,12 @@
       const ptr = M()._ps1test_log_buf(), n = M()._ps1test_log_len();
       return { words: u8ToB64(M().HEAPU8.subarray(ptr, ptr + n * 4)), overflow: !!(M()._ps1test_log_flags() & 2) };
     };
+    /** The CPU-register and GPU blocks of a save state, cut out in the page so a
+     *  per-frame check needn't move the whole 4 MB state: { regs, gpu } base64. */
+    Emu.stateBlocks = () => {
+      const st = gm().getState();
+      return { regs: u8ToB64(st.subarray(REGS, REGS + 134 * 4)), gpu: u8ToB64(st.subarray(REGS + 792, REGS + 792 + 8 + 1024)) };
+    };
     // Live memory: 0 RAM (2 MB), 1 scratchpad + I/O (64 KB), 2 VRAM (1 MB), 3 BIOS.
     const AREA_SIZE = [0x200000, 0x10000, 0x100000, 0x80000];
     const area = (which) => { const p = M()._ps1test_ptr(which); return p ? M().HEAPU8.subarray(p, p + AREA_SIZE[which]) : null; };

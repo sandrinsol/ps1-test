@@ -217,6 +217,10 @@ async function runPlain(emu, steps, { outDir, baseDir = process.cwd(), states = 
     } else if ('loadStateFile' in step) {
       entry.action = `loadStateFile ${step.loadStateFile}`;
       await emu.loadState(await readFile(path.resolve(baseDir, step.loadStateFile)));
+    } else if ('formatCard' in step) {
+      entry.action = `formatCard ${step.formatCard}`;
+      const { formatCard } = await import('./mcard.mjs');
+      await emu.writeMemoryCard(formatCard(), { slot: step.formatCard, reset: step.reset !== false });
     } else if ('importCard' in step) {
       entry.action = `importCard ${step.importCard}`;
       await emu.writeMemoryCard(await readFile(path.resolve(baseDir, step.importCard)), { slot: step.slot ?? 1, reset: step.reset !== false });
