@@ -1,0 +1,8 @@
+.DS_Store
+harness/node_modules/
+harness/out/
+harness/tests/goldens/*.diff.png
+*.log
+# Never commit BIOS dumps or commercial games.
+scph*.bin
+SCPH*.bin
