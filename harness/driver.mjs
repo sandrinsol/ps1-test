@@ -433,18 +433,19 @@ export class EmuHarness {
    *  overflow, frame } (see gpu.mjs decodeLog). Advances time like waitFrames.
    *  `startEx`: the E0-E7 registers at the start (default: read from a state),
    *  e.g. the previous capture's `ex` when capturing frame after frame. */
-  async captureFrame(frames = 1, { startEx = null } = {}) {
+  async captureFrame(frames = 1, { startEx = null, cd = false } = {}) {
     if (!this.live) throw new Error('GPU capture needs the bundled ps1-test core (this core has no command log)');
     if (!startEx) {
       const r = await this.readRegions();
       startEx = Array.from({ length: 8 }, (_, i) => r.gpuControl.readUInt32LE((0xe0 + i) * 4));
     }
-    await this.page.evaluate(() => window.Emu.logCtl(true));
+    await this.page.evaluate((m) => window.Emu.logCtl(m), cd ? 3 : 1);
     try { await this.waitFrames(frames); } finally {
       var log = await this.page.evaluate(() => { const l = window.Emu.logRead(); window.Emu.logCtl(false); return l; });
     }
-    const cap = decodeLog(Buffer.from(log.words, 'base64'), startEx);
-    return { ...cap, overflow: log.overflow, frame: await this.frameNum() };
+    const words = Buffer.from(log.words, 'base64');
+    const cap = decodeLog(words, startEx);
+    return { ...cap, ...(cd ? { cd: decodeCdLog(words) } : {}), overflow: log.overflow, frame: await this.frameNum() };
   }
 
   // ---- Debugger (instrumented core) ----

@@ -1002,7 +1002,7 @@ export function createServer({ root = undefined, fast = true, tools = undefined 
     try {
       let ex = null;
       for (let i = 0; i < frames; i++) {
-        const cap = emu.live ? await emu.captureFrame(1, { startEx: ex }) : (await emu.waitFrames(1), null);
+        const cap = emu.live ? await emu.captureFrame(1, { startEx: ex, cd: true }) : (await emu.waitFrames(1), null);
         ex = cap?.ex ?? null;
         const { cpu, regions } = await emu.readLight();
         checker.observe({ regions, cpu, cap,

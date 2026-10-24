@@ -320,6 +320,29 @@ ok('decodeLog: exception', dec.exceptions[0]?.code === 4 && dec.exceptions[0].ba
   ok('cd log: totals and errors', s.commands === 2 && s.sectors === 2 && s.seeks === 1 && s.errors === 1 && /INT5 error stat 03 \(error,motor\)/.test(s.text), JSON.stringify({ ...s, text: undefined }));
   const files = isoList(await readFile(path.join(FIX, 'hello.bin')));
   ok('isoList: the fixture disc\'s files', files.some((f) => f.path === '/SYSTEM.CNF' && !f.dir) && files.some((f) => f.path === '/MAIN.EXE' && f.size > 0), files.map((f) => f.path).join(', '));
+  const pt = files.find((f) => f.path === '(path table)'), root = files.find((f) => f.path === '(root directory)');
+  ok('isoList: the file system\'s own sectors (path tables, root directory)', !!pt && !!root && pt.system && root.lba > 16, files.map((f) => `${f.path}@${f.lba}`).join(', '));
+  // A seek to the path table and a read of it are named, without doubled parentheses.
+  const w2 = [];
+  const e2 = (type, cycle, data) => { w2.push(((type << 28) | data.length) >>> 0, cycle, ...data); };
+  const bcd = (n) => ((n / 10) | 0) * 16 + (n % 10), sec = pt.lba + 150;
+  e2(5, 0, [0x02 | (3 << 8), bcd((sec / 4500) | 0) | (bcd(((sec / 75) | 0) % 60) << 8) | (bcd(sec % 75) << 16), 0, 0, 0, 0]);
+  e2(7, 10, [((sec / 4500) | 0) | ((((sec / 75) | 0) % 60) << 8) | ((sec % 75) << 16)]);
+  const s2 = summarizeCd(decodeCdLog(Buffer.from(new Uint32Array(w2).buffer)), { files });
+  ok('cd log: file-system sectors are named', new RegExp(`Setloc .* = sector ${pt.lba} \\(path table\\)$`, 'm').test(s2.text) && /read 1 sector\(s\) .* \(path table\)/.test(s2.text) && !/\(\(/.test(s2.text), s2.text);
+}
+
+// ---- check: CD-ROM drive errors ----
+{
+  const frame = { regions: { gpuStatus: 0, gpuControl: Buffer.alloc(1024), vram: Buffer.alloc(1024 * 1024) }, cpu: { pc: 0x80010000, sp: 0x801fff00 } };
+  const cap = (cd) => ({ exceptions: [], prims: [], chains: [], env: { drawArea: { x0: 0, y0: 0, x1: 319, y1: 239 } }, cd });
+  const c = new RunChecker({ symbols: { nameOf: (a) => (a === 0x80010100 ? 'load_level' : null) } });
+  c.observe({ ...frame, cap: cap([{ type: 'command', name: 'ReadN', pc: 0x80010100 }, { type: 'read', lba: 30 }]) });
+  c.observe({ ...frame, cap: cap([{ type: 'irq', irq: 5, result: [0x03, 0x04] }]) });
+  ok('check: a CD-ROM error is reported with the command and caller', c.findings().some((f) => f.level === 'warn' && /CD-ROM drive reported 1 error.*after ReadN \(from load_level\), first on frame 2/.test(f.msg)), c.findings().map((f) => f.msg).join(' | '));
+  const ok2 = new RunChecker();
+  ok2.observe({ ...frame, cap: cap([{ type: 'command', name: 'ReadN', pc: 0 }, { type: 'read', lba: 30 }]) });
+  ok('check: CD-ROM activity without errors is ok', ok2.findings().some((f) => f.level === 'ok' && /CD-ROM: 1 command\(s\), 1 sector\(s\) read, no errors/.test(f.msg)));
 }
 
 done();
