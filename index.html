@@ -67,6 +67,11 @@
     }
     #game { width: 100%; height: 100%; }
     #toolbar { width: 100%; max-width: 800px; justify-content: flex-end; }
+    #keys { width: 100%; max-width: 800px; margin: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; font-size: 13px; color: #8a8a9a; }
+    #keys div { display: flex; gap: 6px; align-items: center; }
+    #keys dt { background: #26263a; color: #e6e6ee; border: 1px solid #33334a; border-radius: 6px; padding: 1px 7px; font-family: ui-monospace, monospace; font-size: 12px; }
+    #keys dd { margin: 0; }
+    @media (pointer: coarse) and (hover: none) { #keys { display: none; } }  /* touch: the on-screen pad */
     #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #2b2b40; padding: 10px 16px; border-radius: 10px; font-size: 14px; }
     dialog { background: #1e1e2b; color: #e6e6ee; border: 1px solid #33334a; border-radius: 14px; width: min(92vw, 480px); padding: 18px; }
     dialog::backdrop { background: rgba(0, 0, 0, .6); }
@@ -112,6 +117,18 @@
   <div id="box" hidden>
     <div id="game"></div>
   </div>
+  <dl id="keys" hidden>
+    <div><dt>W A S D</dt><dd>D-pad</dd></div>
+    <div><dt>I</dt><dd>△ Triangle</dd></div>
+    <div><dt>J</dt><dd>□ Square</dd></div>
+    <div><dt>K</dt><dd>✕ Cross</dd></div>
+    <div><dt>L</dt><dd>○ Circle</dd></div>
+    <div><dt>Q / E</dt><dd>L1 / L2</dd></div>
+    <div><dt>U / O</dt><dd>R1 / R2</dd></div>
+    <div><dt>Enter / V</dt><dd>Start / Select</dd></div>
+    <div><dt>T F G H</dt><dd>Left stick</dd></div>
+    <div><dt>Arrows</dt><dd>Right stick</dd></div>
+  </dl>
 
   <dialog id="cardDlg">
     <h2>Memory card (slot 1)</h2>
@@ -206,6 +223,7 @@
       $('picker').hidden = true;
       $('box').hidden = false;
       $('toolbar').hidden = false;
+      $('keys').hidden = false;
 
       // EmulatorJS configuration — it does all the actual emulation, with the
       // pcsx_rearmed core. Everything is served from the local data/ folder.
@@ -235,6 +253,39 @@
         { type: 'button', text: 'R1', id: 'r1', location: 'right', right: 3, top: -90, bold: true, block: true, input_value: 11 },
         { type: 'button', text: 'R2', id: 'r2', location: 'right', right: 3, top: -140, bold: true, block: true, input_value: 13 },
       ];
+      // Keyboard: WASD for the D-pad, I J K L for △ □ ✕ ○, Q/E and U/O for the
+      // shoulder buttons; the right stick moves to the arrow keys. (Keys: the
+      // RetroPad id the core maps to that PS1 button; value2 is the gamepad.)
+      window.EJS_defaultControls = {
+        0: {
+          0: { value: 'k', value2: 'BUTTON_2' },              // cross
+          1: { value: 'j', value2: 'BUTTON_4' },              // square
+          2: { value: 'v', value2: 'SELECT' },
+          3: { value: 'enter', value2: 'START' },
+          4: { value: 'w', value2: 'DPAD_UP' },
+          5: { value: 's', value2: 'DPAD_DOWN' },
+          6: { value: 'a', value2: 'DPAD_LEFT' },
+          7: { value: 'd', value2: 'DPAD_RIGHT' },
+          8: { value: 'l', value2: 'BUTTON_1' },              // circle
+          9: { value: 'i', value2: 'BUTTON_3' },              // triangle
+          10: { value: 'q', value2: 'LEFT_TOP_SHOULDER' },    // L1
+          11: { value: 'u', value2: 'RIGHT_TOP_SHOULDER' },   // R1
+          12: { value: 'e', value2: 'LEFT_BOTTOM_SHOULDER' }, // L2
+          13: { value: 'o', value2: 'RIGHT_BOTTOM_SHOULDER' },// R2
+          14: { value: '', value2: 'LEFT_STICK' },
+          15: { value: '', value2: 'RIGHT_STICK' },
+          16: { value: 'h', value2: 'LEFT_STICK_X:+1' },
+          17: { value: 'f', value2: 'LEFT_STICK_X:-1' },
+          18: { value: 'g', value2: 'LEFT_STICK_Y:+1' },
+          19: { value: 't', value2: 'LEFT_STICK_Y:-1' },
+          20: { value: 'right arrow', value2: 'RIGHT_STICK_X:+1' },
+          21: { value: 'left arrow', value2: 'RIGHT_STICK_X:-1' },
+          22: { value: 'down arrow', value2: 'RIGHT_STICK_Y:+1' },
+          23: { value: 'up arrow', value2: 'RIGHT_STICK_Y:-1' },
+          24: { value: '1' }, 25: { value: '2' }, 26: { value: '3' }, 27: {}, 28: {}, 29: {},
+        },
+        1: {}, 2: {}, 3: {},
+      };
       // Use the built-in English UI so no localization file is fetched.
       window.EJS_language = 'en-US';
       window.EJS_disableAutoLang = false;

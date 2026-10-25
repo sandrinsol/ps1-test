@@ -62,6 +62,10 @@ try {
   // Memory card panel: format a card, export it, import it back, drop one on the game.
   page.on('dialog', (d) => d.accept());   // "Erase every save…?"
   ok('the toolbar shows while playing', await page.locator('#cardBtn').isVisible());
+  // Keyboard: WASD D-pad, I J K L for △ □ ✕ ○, Q/E L1/L2, U/O R1/R2 (key codes).
+  const keys = await page.evaluate(() => { const c = window.EJS_emulator.controls[0]; return [4, 5, 6, 7, 9, 1, 0, 8, 10, 12, 11, 13].map((i) => c[i].value).join(','); });
+  ok('keyboard: WASD, I J K L, Q E U O', keys === [87, 83, 65, 68, 73, 74, 75, 76, 81, 69, 85, 79].join(','), keys);
+  ok('the key legend shows below the game', await page.locator('#keys').isVisible() && /W A S D/.test(await page.locator('#keys').innerText()));
   await page.click('#cardBtn');
   ok('memory card panel opens', await page.locator('#cardDlg').isVisible(), await page.locator('#cardInfo').textContent());
   await page.click('#cardFormat');

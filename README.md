@@ -32,14 +32,13 @@ dump (best compatibility; it never leaves your computer).
 
 | Action | Key |
 |--------|-----|
-| D-pad | Arrow keys |
-| Cross / Circle | X / Z |
-| Square / Triangle | S / A |
-| L1 / R1 | Q / E |
-| L2 / R2 | Tab / R |
+| D-pad | W A S D |
+| Triangle / Square / Cross / Circle | I / J / K / L |
+| L1 / L2 | Q / E |
+| R1 / R2 | U / O |
 | Start / Select | Enter / V |
 | Left stick | T F G H |
-| Right stick | I J K L |
+| Right stick | Arrow keys |
 
 The bar at the bottom has pause, save states, fullscreen, volume and settings
 (including gamepads and the controller type). On a phone or tablet an on-screen
